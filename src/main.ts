@@ -5609,7 +5609,16 @@ async function loadWorld(
   const loadSeq = worldLoadSeq;
   void (async () => {
     try {
-      const real = await createWorldObjects(mapId, msg => setProgress(msg, 55), tileAt);
+      // 物件加载先起跑（慢，但和刷怪互不依赖）
+      const objectsTask = createWorldObjects(mapId, msg => setProgress(msg, 55), tileAt);
+
+      /*
+       * 刷怪放在物件**前面**：怪物只依赖配置 JSON + 怪物模型，线上 2-5 秒就能出；
+       * 而物件（109 类、几百张贴图）要几十秒。先有怪可打，环境慢慢补。
+       */
+      if (opts.offline) await spawnDemoMonsters(x, y);
+
+      const real = await objectsTask;
       if (loadSeq !== worldLoadSeq || world?.root !== root) {
         // 已经换图了：把这次白加载的几何丢掉
         real.group.traverse(o => {
@@ -5657,7 +5666,6 @@ async function loadWorld(
       /* ---- 怪物（仅离线演示）：也不挡进场景 ---- */
       if (opts.offline) {
         if (loadSeq !== worldLoadSeq) return;
-        await spawnDemoMonsters(x, y);
         await spawnSkillDummy(terrain);
         /*
          * 预热技能资源：面板随时可能点 Cast，别让第一次等一秒。
