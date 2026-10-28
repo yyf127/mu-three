@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import { fileURLToPath } from 'node:url';
-import { copyFileSync, cpSync, existsSync, mkdirSync, statSync, createReadStream, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, statSync, createReadStream, rmSync, writeFileSync } from 'node:fs';
 import { join, extname, normalize } from 'node:path';
 // 网关核心与 server/bridge.mjs 共用同一份实现，避免两份转发逻辑漂移
 import { createBridge } from './server/bridge-core.mjs';
@@ -203,6 +203,49 @@ function demoAlias(): Plugin {
         cpSync(dbSrc, join(DIST, 'server', 'data'), { recursive: true, force: true });
         console.log('[mu-demo-alias] dist/server/data 已同步（服务端配置 JSON）');
       }
+
+      /*
+       * Cloudflare Pages 的两个约定文件。GitHub Pages 不认识它们，会当普通
+       * 文件忽略，所以同一份 dist 可以同时喂两边。
+       *
+       * `_redirects`：`/demo` 直接 200 重写到 index.html。
+       *   没有它的话 Cloudflare 会走 404.html 兜底 —— 页面能开，但状态码是
+       *   404，浏览器控制台会红一条，SEO/监控也难看。
+       *
+       * `_headers`：`Data/` 是 208MB 的原始资源，Cloudflare 默认只给
+       *   `max-age=0, must-revalidate`，每次进图都要为几千个文件各发一次
+       *   协商请求。这里给长缓存（文件名固定，改资源要清缓存或用新文件名）。
+       */
+      const bp = BUILD_BASE.endsWith('/') ? BUILD_BASE : `${BUILD_BASE}/`;
+      writeFileSync(
+        join(DIST, '_redirects'),
+        `# Cloudflare Pages 专用；GitHub Pages 会忽略\n${bp}demo ${bp}index.html 200\n`
+      );
+      writeFileSync(
+        join(DIST, '_headers'),
+        [
+          '# Cloudflare Pages 专用；GitHub Pages 会忽略',
+          '# 带 hash 的构建产物可以永久缓存',
+          '/assets/*',
+          '  Cache-Control: public, max-age=31536000, immutable',
+          '',
+          '# 入口 HTML 绝不能被缓存，否则发版后用户还打开旧页面',
+          '/index.html',
+          '  Cache-Control: no-cache',
+          '/404.html',
+          '  Cache-Control: no-cache',
+          '',
+          '# 原版资源（bmd/ozj/ozt）：体积大、名字固定，给一周',
+          '/Data/*',
+          '  Cache-Control: public, max-age=604800',
+          '',
+          '# 服务端配置可能随构建变化',
+          '/server/*',
+          '  Cache-Control: no-cache',
+          '',
+        ].join('\n')
+      );
+      console.log('[mu-demo-alias] dist/_redirects、dist/_headers 已生成（Cloudflare Pages）');
     },
   };
 }
