@@ -15,7 +15,8 @@
 | `tools/` | ✅ | 探针与工具（`demo-probe.mjs`、`serve-gh.mjs` …） |
 | `docs/` | ✅ | 设计/迁移/部署文档 |
 | `dist/Data/`（3548 个文件，208MB） | ✅ | 原版客户端资源；`vite.config.ts` 的 `localAssets()` 直接托管，dev/CI/线上共用这一份 |
-| `dist/assets/`、`dist/index.html`、`dist/404.html` | ❌ | 构建产物，`.gitignore` 排除，CI 生成 |
+| `server/data/game.json` | ✅ | 服务端配置（怪物/刷怪点/技能），由 `npm run config:build` 从 `MuServer/Data` 生成；运行时按 `/server/data/game.json` 取 |
+| `dist/assets/`、`dist/index.html`、`dist/404.html`、`dist/server/` | ❌ | 构建产物，`.gitignore` 排除，CI 生成 |
 | `node_modules/`、`*.log`、`shots/`、`*.png`、`.tmp/`、`dist-verify/`、`net-test.html` | ❌ | 依赖 / 调试产物 |
 
 为什么资源不放 `public/`：项目从一开始就是「直接加载原版 `Data/`」，

@@ -1,6 +1,6 @@
 import { defineConfig, type Plugin } from 'vite';
 import { fileURLToPath } from 'node:url';
-import { copyFileSync, existsSync, statSync, createReadStream, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, statSync, createReadStream, rmSync } from 'node:fs';
 import { join, extname, normalize } from 'node:path';
 // 网关核心与 server/bridge.mjs 共用同一份实现，避免两份转发逻辑漂移
 import { createBridge } from './server/bridge-core.mjs';
@@ -89,13 +89,19 @@ function muBridge(): Plugin {
 function localAssets(): Plugin {
   const handler = (req: any, res: any, next: () => void) => {
     const url = decodeURIComponent((req.url ?? '').split('?')[0]);
-    const at = url.indexOf('/Data/');
-    if (at < 0) return next();
-
-    const rel = url.slice(at + 1); // Data/Item/x.bmd
-    const file = normalize(join(DIST, rel));
+    /*
+     * 两个静态根：
+     *   /Data/**    → dist/Data（原版客户端资源）
+     *   /server/**  → server/    （服务端侧资产：sqlite 配置库等）
+     * 前端统一用 `assetUrl('server/data/game.db')` 取。
+     */
+    const m = /\/(Data|server)\//.exec(url);
+    if (!m) return next();
+    const rel = url.slice(m.index + 1);
+    const root = m[1] === 'Data' ? DIST : ROOT;
+    const file = normalize(join(root, rel));
     // 目录穿越防护：必须落在 dist 内
-    if (!file.startsWith(DIST) || !existsSync(file) || !statSync(file).isFile()) return next();
+    if (!file.startsWith(root) || !existsSync(file) || !statSync(file).isFile()) return next();
 
     const size = statSync(file).size;
     res.setHeader('Content-Type', MIME[extname(file).toLowerCase()] ?? 'application/octet-stream');
@@ -185,6 +191,18 @@ function demoAlias(): Plugin {
       if (!existsSync(index)) return;
       copyFileSync(index, join(DIST, '404.html'));
       console.log('[mu-demo-alias] dist/404.html 已生成（GitHub Pages 的 /demo 兜底）');
+
+      /*
+       * 服务端配置（`server/data/game.json`）也要进 dist —— 线上只有静态文件，
+       * 浏览器得能 `fetch('/mu-three/server/data/game.json')`。
+       * 源文件放在 server/ 下（跟网关代码一起），dist 里的是副本。
+       */
+      const dbSrc = join(ROOT, 'server', 'data');
+      if (existsSync(dbSrc)) {
+        mkdirSync(join(DIST, 'server'), { recursive: true });
+        cpSync(dbSrc, join(DIST, 'server', 'data'), { recursive: true, force: true });
+        console.log('[mu-demo-alias] dist/server/data 已同步（服务端配置 JSON）');
+      }
     },
   };
 }

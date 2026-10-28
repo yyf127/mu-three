@@ -201,6 +201,7 @@ import { DamageTexts } from './ui/damageText';
 import { WorldTags, type TagItem } from './ui/worldTags';
 import { EscMenu } from './ui/escMenu';
 import { monsterMaxLifeOf, monsterNameOf } from './data/monsters';
+import { gameConfigStatus, monsterTable, spawnTable, type MonsterDef } from './data/gameConfig';
 import { ItemLabels, type GroundLabel } from './ui/itemLabels';
 import { MinimapPanel, type MinimapMark } from './ui/minimapPanel';
 import { UiLayer } from './ui/frame';
@@ -5593,6 +5594,9 @@ async function loadWorld(
     monsters,
     setProgress,
     world,
+    /** 服务端配置库状态（调试/探针） */
+    gameConfig: gameConfigInfo,
+    monsterDefs: demoMonsterDefs,
   };
 
   /*
@@ -5653,29 +5657,7 @@ async function loadWorld(
       /* ---- 怪物（仅离线演示）：也不挡进场景 ---- */
       if (opts.offline) {
         if (loadSeq !== worldLoadSeq) return;
-        // 用服务端刷怪表里的真实 Class：3=Spider、2=Budge Dragon、7=Bull Fighter、255=Barmaid(NPC)
-        const spots = [
-          { cls: 3, dx: -6, dy: 5 },
-          { cls: 2, dx: 5, dy: 7 },
-          { cls: 7, dx: 2, dy: 11 },
-          { cls: 255, dx: -4, dy: -5 },
-          { cls: 248, dx: 6, dy: -6 },
-        ];
-        for (const spot of spots) {
-          const created = await createCreatureByClass(
-            scene,
-            { monster: MONSTER_DIR, npc: NPC_DIR },
-            spot.cls
-          );
-          if (!created) continue;
-          const m = created.actor;
-          m.x = x + spot.dx;
-          m.y = y + spot.dy;
-          m.z = terrain.getHeight(m.x, m.y);
-          m.yaw = Math.random() * Math.PI * 2;
-          monsters.push(m);
-          if (playerShadow) addMonsterShadow(m);
-        }
+        await spawnDemoMonsters(x, y);
         await spawnSkillDummy(terrain);
         /*
          * 预热技能资源：面板随时可能点 Cast，别让第一次等一秒。
@@ -5688,6 +5670,103 @@ async function loadWorld(
       console.warn('[MU] 物件/氛围后台加载失败（场景仍可玩）', err);
     }
   })();
+}
+
+/**
+ * 演示怪物的服务端属性（class → Monster.txt 行）。
+ *
+ * 战斗/掉落下一轮从这里取，避免每次都回调 SQLite。
+ */
+const demoMonsterDefs = new Map<object, MonsterDef>();
+
+/** 给调试/探针看「SQLite 连接线到底通没通」 */
+function gameConfigInfo() {
+  const st = gameConfigStatus();
+  return { ...st, monsters: demoMonsterDefs.size };
+}
+
+/**
+ * 按服务端的刷怪表刷怪（`MonsterSetBase.txt` → SQLite `spawn` 表）。
+ *
+ * 以前是 5 只硬编码怪挤在出生点旁边。现在：
+ *   - 读本图全部刷怪点（洛兰 37 条），按离出生点距离排序，取视野内最近的 40 只；
+ *   - 怪物种类/等级/血量/攻防/掉率来自 `Monster.txt`（`monster` 表）；
+ *   - `Range > 0` 的点在半径内随机落点（服务端就是这个语义）；
+ *   - 库里没有的 class（极少）照样建模型，只是不带属性 —— NPC 不能被吞掉。
+ *
+ * SQLite 打不开时退回原来那 5 只，保证演示永远能进图。
+ */
+async function spawnDemoMonsters(baseX: number, baseY: number) {
+  const mapId = world?.mapId ?? 0;
+  const [spawns, table] = await Promise.all([spawnTable(mapId), monsterTable()]);
+  if (!spawns.length || !table.size) {
+    console.warn('[demo] 刷怪表不可用，退回硬编码 5 只');
+    for (const spot of [
+      { cls: 3, dx: -6, dy: 5 },
+      { cls: 2, dx: 5, dy: 7 },
+      { cls: 7, dx: 2, dy: 11 },
+      { cls: 255, dx: -4, dy: -5 },
+      { cls: 248, dx: 6, dy: -6 },
+    ]) {
+      const created = await createCreatureByClass(scene, { monster: MONSTER_DIR, npc: NPC_DIR }, spot.cls);
+      if (!created) continue;
+      const m = created.actor;
+      m.x = baseX + spot.dx;
+      m.y = baseY + spot.dy;
+      m.z = world ? world.terrain.getHeight(m.x, m.y) : 0;
+      m.yaw = Math.random() * Math.PI * 2;
+      monsters.push(m);
+      if (playerShadow) addMonsterShadow(m);
+    }
+    return;
+  }
+
+  /*
+   * 视野 60 格、总量上限 60 只。
+   *
+   * `MonsterSetBase.txt` 的 `Range` 是「刷怪半径」：`range:30` 的点（洛兰的
+   * Spider/Budge Dragon 那几处）在服务端会在 30 格内刷一群，不是 1 只。
+   * 这里按半径折算只数（每 8 格 1 只，最多 6 只），并把「到范围圆的距离」
+   * 当作远近排序依据 —— 否则大范围刷怪点会因为中心远而被整片裁掉。
+   */
+  const VIEW = 80;
+  const MAX = 80;
+  const near = spawns
+    .map(sp => ({ sp, d: Math.max(0, Math.hypot(sp.x - baseX, sp.y - baseY) - sp.range) }))
+    .filter(o => o.d <= VIEW)
+    .sort((a, b) => a.d - b.d);
+
+  let spawned = 0;
+  let withDef = 0;
+  for (const { sp } of near) {
+    const r = Math.max(0, sp.range);
+    // 固定点刷 1 只；范围点按半径刷一群
+    const count = r > 0 ? Math.min(3, Math.max(1, Math.round(r / 10))) : 1;
+    for (let k = 0; k < count && spawned < MAX; k++) {
+      const created = await createCreatureByClass(scene, { monster: MONSTER_DIR, npc: NPC_DIR }, sp.mob);
+      if (!created) break;
+      const m = created.actor;
+      m.x = sp.x + (r ? (Math.random() * 2 - 1) * r : 0);
+      m.y = sp.y + (r ? (Math.random() * 2 - 1) * r : 0);
+      m.z = world ? world.terrain.getHeight(m.x, m.y) : 0;
+      // 服务端 Direct 是 0..7 的八方向，换算成弧度
+      m.yaw = (sp.dir / 8) * Math.PI * 2;
+      const def = table.get(sp.mob);
+      if (def) {
+        demoMonsterDefs.set(m, def);
+        withDef++;
+      }
+      monsters.push(m);
+      if (playerShadow) addMonsterShadow(m);
+      spawned++;
+    }
+    if (spawned >= MAX) break;
+  }
+
+  console.log(
+    `[demo] 刷怪表 ${spawns.length} 点，视野内 ${spawned} 只（带属性 ${withDef}）` +
+      ` · game.json ${gameConfigStatus().state}`
+  );
 }
 
 /**

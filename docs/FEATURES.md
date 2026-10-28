@@ -4406,3 +4406,106 @@ if (s.kind === 'glow' && !ObjectFxLayer.GROUND_GLOW) continue;
 | `demo-probe`（本地 / 线上） | 28/28 / 28/28，进图 1.7s / 21.9s |
 | 渐进加载 | 进场景 `placed=0` → 2s 后 `placed=2792`；`glow=0` / `fire=267`（本地/线上一致） |
 | `esc-probe`（实机：真登录 + 刷怪 + 攻击 + ESC） | PASS，画面正常 |
+
+# 阶段 CM：去掉操作提示 / 取消 WASD / 演示面板加显隐按钮
+
+## 一、右下角操作提示删除
+
+`index.html` 的 `.hud-bottom-right`（左键/WASD/C/I/P 那四行）整块删掉，
+`style.css` 里对应两条规则一起清 —— 手机上它压在底栏右上方，既挡视野又没人看。
+
+## 二、取消 WASD 移动
+
+`main.ts` 的键盘移动只留方向键：
+
+```ts
+// 以前：KeyW/ArrowUp、KeyS/ArrowDown、KeyD/ArrowRight、KeyA/ArrowLeft
+if (keys.has('ArrowUp')) moveDir.add(camForward);
+...
+```
+
+理由：`W` 同时是快捷栏 2（`useQuickSlot`），按住 W 会「一边跑一边放技能」；
+手机上根本没有键盘，走位统一交给「左键点地板」。
+
+## 三、演示面板（`#sandbox`）加显隐按钮
+
+手机上面板（Class/Equipment/Skill 三张卡）会盖掉左半屏。改成一个明确但小巧的
+按钮：**右下角「演示面板」/「收起面板」**（74×23，金色描边 + 微光，底栏上方）。
+
+| 行为 | 说明 |
+|---|---|
+| 默认 | 收起（`localStorage['mu.sandboxOpen']` 记忆，第一次进来是收起的） |
+| 点一次 | 展开三张卡；再点收起 |
+| P 键 | 和按钮同一条路径（`toggleUser()`） |
+| 什么时候出现 | 只有「离线沙盘 && 已进图 && 不在读条」时按钮才露（`setAvailable`） |
+
+`showScreens` 里把两件事拆开了：
+
+```ts
+const sandboxReady = sandbox.on && hud && !loading;
+sandboxPanel.setAvailable(sandboxReady);                    // 此刻能不能显示
+sandboxPanel.show(sandboxReady && sandboxPanel.userOpened);  // 用户想不想看
+```
+
+以前是 `show(sandbox.on && hud && !loading)`，每次开背包/切面板都会把用户收起来的面板
+又弹出来；现在用户意愿存 `userOpen`，不会被界面刷新覆盖。
+
+## 四、验证
+
+| 检查 | 结果 |
+|---|---|
+| `npm run tsc` / `npm run build` | PASS |
+| 本地 `demo-probe` | 28/28 |
+| 按钮 | 初始「演示面板」+ 面板隐藏 → 点击展开（文案变「收起面板」）→ 再点收起 |
+| 操作提示 | `.hud-bottom-right` 不存在（本地 / 线上 `grep` 计数 0） |
+| WASD | 按住 W 1.2-1.5s，`player.x/y` 不变（本地 / 线上一致） |
+
+# 阶段 CN：服务端配置编成 JSON，演示服按真实刷怪表出怪
+
+## 一、为什么不是 SQLite
+
+一开始做过一版 `game.db`（sql.js + WASM），跑通了，但算下来不划算：
+
+| | SQLite（sql.js） | JSON（现在） |
+|---|---|---|
+| 体积 | wasm 670KB + 库 112KB | **109KB**（gzip ~18KB） |
+| 加载 | 60ms 初始化 | **4ms**（`fetch` + `JSON.parse`） |
+| 数据量 | 159 怪 / 1490 刷怪点 / 45 技能 = 2000 行 | 同 |
+| 依赖 | `sql.js` + `@types/sql.js` | 0 |
+
+配置是**只读、全量、本地**，SQL 的并发/事务/索引都用不上 —— 一张表能解决的事不请数据库。
+（要做「存档 / 背包 / 任务进度」这种可变状态时再上，浏览器端也首选 IndexedDB。）
+
+## 二、管线
+
+```
+MuServer/Data/*.txt  ──tools/build-game-config.mjs──►  server/data/game.json  ──CI──► dist/server/data/
+   Monster.txt / MonsterSetBase.txt / Skill.txt            （入仓库，派生数据）
+```
+
+- 脚本只读 txt、只写 JSON，无第三方依赖（Node 内置足够）；
+- 结果**入仓库**，CI 不跑脚本（CI 里没有 MuServer）；
+- `vite.config.ts` 的 `localAssets()` 多托管一个 `/server/**`（dev 直接读 `server/`，
+  构建时 `cpSync` 进 `dist/server/data/`），前端统一 `assetUrl('server/data/game.json')`。
+
+## 三、演示服出怪：不再硬编码
+
+`loadWorld` 的 offline 分支原来写死 5 只怪。现在：
+
+1. `spawnTable(mapId)` 读该图刷怪点（洛兰 37 条 / 全服 1490 条）；
+2. 按「到刷怪范围圆的距离」排序，视野 80 格内取点；
+3. `Range > 0` 的点按半径成群刷（每 10 格 1 只，上限 3 只）；
+4. 每只的等级/血量/攻防/掉率/金钱来自 `Monster.txt`，存在 `demoMonsterDefs`（WeakMap 之外用 Map）。
+
+实测（洛兰出生点 133,131）：`刷怪表 37 点，视野内 35 只（带属性 35）`，
+含 `Berdysh Guard Lv90 HP10000`、`Golden Archer Lv2 HP50`、`Dead King`、`Spider` 等 —— 全按服务端配置。
+
+## 四、验证
+
+| 检查 | 结果 |
+|---|---|
+| `npm run config:build` | 109KB，159 怪 / 1490 刷怪点 / 16 图 / 45 技能 |
+| `tsc` / `build` | PASS；`dist/assets` 从 1.8MB → **1.1MB**（少掉 wasm） |
+| 浏览器 | `gameConfig: ready, 110837B, 4ms, counts{monsters:159,spawns:1490}` |
+| 出怪 | 视野内 16-35 只（随加载时刻），全部带服务端属性 |
+| `demo-probe`（本地 serve:gh） | 28/28 |

@@ -4,6 +4,7 @@ node_modules/
 dist/assets/
 dist/index.html
 dist/404.html
+dist/server/
 dist-verify/
 .tmp/
 

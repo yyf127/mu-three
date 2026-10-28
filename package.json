@@ -21,7 +21,8 @@
     "attack:probe": "node tools/attack-probe.mjs",
     "packet:test": "node tools/packet-test.mjs",
     "v43:probe": "node tools/v43-probe.mjs",
-    "serve:gh": "node tools/serve-gh.mjs"
+    "serve:gh": "node tools/serve-gh.mjs",
+    "config:build": "node tools/build-game-config.mjs"
   },
   "dependencies": {
     "three": "^0.169.0",
