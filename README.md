@@ -381,6 +381,21 @@ npm run net:login:browser   # 无头浏览器跑 net-test.html（同一套前端
 离线演示时左边有个「角色 / 装备 / 技能」沙盘：**按住卡片标题就能把它拖到任何位置**
 （位置记在 `localStorage`，下次打开还在原处）；右上角是 **Tab** 开关的小地图。
 
+### 离线演示服能打到什么（阶段 CN/CO/CP）
+
+演示没有服务端，但怪物/掉落全部来自**服务端配置**（`server/data/game.json`，
+由 `npm run config:build` 从 `MuServer/Data` 生成）：
+
+| 环节 | 依据 |
+|---|---|
+| 出怪 | `MonsterSetBase.txt` 的刷怪点，按范围成群刷，视野内最多 80 只 |
+| 等级 / 血量 / 攻防 / 金钱 | `Monster.txt` |
+| 经验 / 掉率 / 掉落池 | 经验 ≈ `Lv²×1.6 + Lv×8`；掉落池 = `Item.txt` 里「物品等级 ∈ [怪等级-2, +4]」且可掉的物品 |
+| 掉落物 | 击杀后掉在脚下，**按 Alt 或悬停看名字**，走过去点它就进背包 |
+
+怪物头顶有名字 + 血条（挨打时实时变化）。`__MU_APP__` 上有调试口：
+`demoMonsters()` / `progress()` / `demoDrops()` / `bag()` / `attack(id)`。
+
 ### 地图资源是「地图号 + 1」
 
 | 地图号 | 地图 | 资源目录 |

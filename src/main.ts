@@ -202,6 +202,7 @@ import { WorldTags, type TagItem } from './ui/worldTags';
 import { EscMenu } from './ui/escMenu';
 import { monsterMaxLifeOf, monsterNameOf } from './data/monsters';
 import { gameConfigStatus, monsterTable, spawnTable, type MonsterDef } from './data/gameConfig';
+import { rollDrops } from './data/loot';
 import { ItemLabels, type GroundLabel } from './ui/itemLabels';
 import { MinimapPanel, type MinimapMark } from './ui/minimapPanel';
 import { UiLayer } from './ui/frame';
@@ -1837,6 +1838,29 @@ function syncWorldTags() {
       // 队友才画十格条：`0x44` 的十等分；还没收到过就按满血画（原版初始也是 10）
       tenths: member ? (partyLife.get(member.number) ?? 10) : undefined,
       hpText: member ? `${Math.round(member.life)}/${Math.round(member.maxLife)}` : undefined,
+    });
+  }
+
+  /*
+   * 离线演示的本地怪（`demoTargets`）：也画名字 + 血条。
+   *
+   * 它们不在 `remotes` 里（那边只装服务端下发的实体），血量在 `DemoTarget`
+   * 自己身上 —— 挨打时 `hitDemoTarget` 改 `hp`，这一帧血条就跟着变，
+   * 和联机等 `0x15` 回包再更新的观感一致。
+   */
+  for (const t of demoTargets.values()) {
+    if (t.hp <= 0) continue;
+    const groundZ = terrain.getHeight(t.x, t.y);
+    const h = headHeightOf(t.actor, groundZ, 1.9);
+    items.push({
+      id: t.id,
+      name: t.def.name,
+      x: t.x,
+      y: t.y,
+      z: groundZ + h + 0.08,
+      kind: 'monster',
+      focused: t.id === focusId,
+      hpRatio: t.maxHp > 0 ? Math.max(0, Math.min(1, t.hp / t.maxHp)) : undefined,
     });
   }
 
@@ -5707,6 +5731,65 @@ interface DemoTarget {
 const demoTargets = new Map<number, DemoTarget>();
 let demoNextTargetId = 900001;
 
+/**
+ * 演示掉落的「本地地面物品」id 段。
+ *
+ * 服务端下发的物品 id 是 `m_Item` 下标（从 0 起），离线演示没有服务端，
+ * 用 500000 起的一段避开，免得以后接回联机时撞号。
+ */
+let demoNextDropId = 500001;
+/** 本地掉落上限：再多就捡不完，也会拖帧 */
+const DEMO_DROP_LIMIT = 60;
+const demoDropIds: number[] = [];
+
+/**
+ * 击杀掉落（本地）。
+ *
+ * 掷骰在 `data/loot.ts`（照服务端 `Monster.cpp` 的公式），这里只负责
+ * 「摆到地上」：怪物脚下随机偏 0-1 格，然后交给 `groundItems` 建模型 + 光斑。
+ * 拾取走 `tryPickup` 的离线分支（没有 socket 时本地收走）。
+ */
+async function dropDemoLoot(t: DemoTarget) {
+  const rolls = await rollDrops(t.def);
+  if (!rolls.length) return;
+
+  const gy = world ? world.terrain.getHeight(t.x, t.y) : 0;
+  const spawned: GroundItem[] = [];
+  for (const r of rolls) {
+    const id = demoNextDropId++;
+    // 掉在怪物脚下 1 格内（服务端也是 `GetDropPosition` 随机偏移）
+    const x = Math.max(0, Math.min(255, Math.round(t.x + (Math.random() * 2 - 1))));
+    const y = Math.max(0, Math.min(255, Math.round(t.y + (Math.random() * 2 - 1))));
+    spawned.push({
+      id,
+      x,
+      y,
+      type: r.type,
+      level: r.level,
+      durability: 0,
+      option: 0,
+      excellent: false,
+      skill: false,
+      luck: false,
+      isMoney: false,
+      money: 0,
+    });
+    demoDropIds.push(id);
+  }
+  groundItems.upsert(spawned);
+
+  // 超出上限先清最早那几件
+  while (demoDropIds.length > DEMO_DROP_LIMIT) {
+    const old = demoDropIds.shift();
+    if (old != null) groundItems.remove(old);
+  }
+
+  const name = itemDisplayName(spawned[0].type);
+  const plus = spawned[0].level > 0 ? ` +${spawned[0].level}` : '';
+  damageTexts.spawn({ x: t.x, y: t.y, z: gy + 0.6 }, `掉落 ${name}${plus}`, 'exp');
+  console.log(`[demo] ${t.def.name} 掉落 ${name}${plus}（type=${spawned[0].type}）`);
+}
+
 /** 离玩家最近的本地怪（服务端那边是 `remotes.nearestMonster`） */
 function nearestDemoTarget(x: number, y: number, range: number): DemoTarget | null {
   let best: DemoTarget | null = null;
@@ -5775,6 +5858,9 @@ function hitDemoTarget(t: DemoTarget) {
     `[demo] 击杀 ${t.def.name} Lv${t.def.level} → +${exp} EXP / +${zen} Zen` +
       (ups ? ` / 升级 → Lv${currentChar?.level}` : '')
   );
+
+  // 掉落（异步：要等配置里的物品池），不挡击杀结算
+  void dropDemoLoot(t);
 }
 
 /** 给调试/探针看「SQLite 连接线到底通没通」 */
@@ -9072,6 +9158,18 @@ function onDropReply(pkt: Uint8Array) {
   }
 }
 
+/**
+ * 离线拾取：找一个能放下这件东西的背包格（12..75 是 8×8 背包）。
+ *
+ * 复用 `canPlaceInGrid`（和拖拽同一套碰撞判定），找不到返回 -1。
+ */
+function findDemoFreeSlot(type: number): number {
+  for (let slot = 12; slot < 12 + 64; slot++) {
+    if (canPlaceInGrid(type, slot, inventoryItems, -1)) return slot;
+  }
+  return -1;
+}
+
 /** 对某件地面物品发起拾取（距离够就直接发，太远则走过去） */
 function tryPickup(itemId: number) {
   const item = groundItems.get(itemId);
@@ -9114,13 +9212,31 @@ function updatePickup(dt: number) {
     // 离线演示没有服务端，直接本地收走
     if (!connection || !connection.connected) {
       const name = itemDisplayName(item.type);
+      const plus = item.level > 0 ? ` +${item.level}` : '';
+      /*
+       * 本地入包：服务端那套是回 `0x22` 带上放进的槽位号，离线没有回包，
+       * 自己找一个空位。真装不下就**别从地上拿走**（不然东西凭空消失）。
+       */
+      const slot = findDemoFreeSlot(item.type);
+      if (slot < 0) {
+        pendingPickupId = -1;
+        inventoryPanel.toast('背包已满');
+        return;
+      }
       groundItems.remove(pendingPickupId);
       pendingPickupId = -1;
-      damageTexts.spawn(
-        { x: player.x, y: player.y, z: player.z + 2.1 },
-        name,
-        'exp'
-      );
+      addInventoryItem({
+        slot,
+        type: item.type,
+        level: item.level,
+        skill: item.skill,
+        luck: item.luck,
+        option: item.option,
+        durability: item.durability || itemAttr(item.type).dura,
+        excellent: item.excellent ? 1 : 0,
+      });
+      sfx(0x1d, { volume: 0.8 });
+      damageTexts.spawn({ x: player.x, y: player.y, z: player.z + 2.1 }, `${name}${plus}`, 'exp');
       return;
     }
     groundItems.markPicking(pendingPickupId);
@@ -11051,6 +11167,11 @@ function boot() {
     },
     items: () => groundItems.list(),
     itemCount: () => groundItems.size,
+    /** 背包快照（演示拾取/入包验证用） */
+    bag: () =>
+      inventoryItems.map(i => ({ slot: i.slot, type: i.type, level: i.level })),
+    /** 本地掉落 id（>= 500000）与数量，探针区分「服务端下发」和「本地掉的」 */
+    demoDrops: () => demoDropIds.slice(),
     nearestItem: (range = 3) =>
       player ? groundItems.nearest(player.x, player.y, range) : null,
     pickupItem: (id: number) => tryPickup(id),

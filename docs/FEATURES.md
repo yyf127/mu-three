@@ -4556,3 +4556,76 @@ progress 后 {level:120, exp:22,     money:1234767}
 
 `demo-probe` 28/28 未回归。**未做**：怪物血条（`worldTags` 目前只画 remotes）与掉落物品
 （`EventItemBag` 的 11 个包都是特殊怪，普通掉落要按 `item_rate` 自己生成）。
+
+
+# 阶段 CP：本地怪血条 + 击杀掉落 + 离线拾取入包
+
+## 一、血条：`worldTags` 原来只看 `remotes`
+
+"名字 + 血条" 那一层的数据源是 `remotes.list()`（服务端下发的实体），离线演示的怪
+在本地 `demoTargets` 里，所以之前**只有名字、没有血条**（`hpRatio` 字段早就支持，
+只是没人喂）。
+
+现在 `syncWorldTags()` 在 `remotes` 循环之后补一段：
+
+```ts
+for (const t of demoTargets.values()) {
+  if (t.hp <= 0) continue;
+  items.push({
+    id: t.id, name: t.def.name, x: t.x, y: t.y, z: groundZ + headHeightOf(...) + 0.08,
+    kind: 'monster', focused: t.id === focusId,
+    hpRatio: t.hp / t.maxHp,
+  });
+}
+```
+
+血量在 `DemoTarget` 自己身上（`hitDemoTarget` 扣），所以挨打当帧血条就变 ——
+实测 `Berdysh Guard` 1.00 → 0.98，和联机等 `0x15` 再更新的观感一致。
+
+## 二、掉落：照服务端公式掷骰
+
+`Monster.cpp::Die` 后半段：
+
+```
+DropIndex = GetMonsterItem(怪物等级)                    // 池子按物品等级筛
+if (rand % max(1, ItemRate) < ItemDropRate) { 掉 }
+```
+
+- `ItemDropRate` 取 `GameServerInfo - Common.dat` 的 `ItemDropRate_AL0..3 = 100`；
+- 池子照 `CMonsterManager::InsertMonsterItem`：`Drop != 0` 且 `物品等级 ∈ [L-2, L+4]`，
+  所以 `build-game-config.mjs` 现在多导一张 `items`（283 行，`[type, level, drop]`）；
+- `ItemRate` 在这版服务端里是**除数**（`2` ≈ 必掉、`200` = 50%），照抄，不"修正"。
+
+新增 `src/data/loot.ts`：`rollDrops(def)` → `{type, level}[]`。
+`+N` 概率用怪物等级近似（`ItemOptionRate.txt` 本服没有）。卓越/幸运/技能位先不出。
+
+掉在地上：`dropDemoLoot()` 生成 `GroundItem`（id 从 500000 起，避开服务端 `m_Item` 下标）
+→ `groundItems.upsert()` 复用现有模型 + 光斑 + 名字标签渲染，本地最多留 60 件。
+
+## 三、拾取：离线也能进背包
+
+原来离线分支只是「从地上删掉 + 飘个名字」，背包永远是空的。现在：
+
+1. `findDemoFreeSlot(type)` 用 `canPlaceInGrid` 扫 12..75（8×8 背包）找空位；
+2. 有空位 → `addInventoryItem({slot, type, level, …})` + `sfx(0x1d)`，背包/角色面板立刻刷新；
+3. 没空位 → **不从地上拿走**，提示「背包已满」（否则东西凭空消失）。
+
+## 四、`Item.txt` 的坑：不能丢空字段
+
+`readTable()` 会 `filter(c => c !== '')`（Monster.txt 那种「对齐空 tab」必须丢），
+但 `Item.txt` 的行长**不固定**：名字后有 5 个对齐空 tab、行尾的 0 又常被省略。
+丢空字段后同一列会漂移（`ItemRate` 之前只解析出 81/393 条就是这个原因）。
+
+改成按 tab 硬切、固定下标取：`[0]=Index [7]=Drop [14]=Level`，283 条全部正确。
+
+## 五、验证
+
+| 检查 | 结果 |
+|---|---|
+| `npm run config:build` | 111KB，283 物品 / 242 可掉 |
+| `tsc` / `build` | PASS |
+| 本地血条 | `Golden Archer` / `Berdysh Guard` / `Lumen the Barmaid` 均 `bar=true, ratio=1.00` |
+| 挨打 | `Berdysh Guard` 1.00 → 0.98 |
+| 击杀掉落 | `Golden Archer` → 掉 1 件（`type=448` 苹果 / 或 `234` 毒斧）@ 脚下 |
+| 拾取 | 地面归零、背包 `[{slot:12, type:448, level:0}]` |
+| `demo-probe`（本地 serve:gh） | 28/28 |

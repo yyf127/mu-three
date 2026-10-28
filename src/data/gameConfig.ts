@@ -52,11 +52,15 @@ export interface SkillDef {
   reqLevel: number;
 }
 
+/** `Item.txt` 的掉落相关三列：type = group*32 + index、物品等级、是否可掉 */
+export type ItemDropRow = [type: number, level: number, drop: number];
+
 interface GameConfigFile {
   meta: { builtAt: string; source: string; counts: Record<string, number> };
   monsters: Record<string, MonsterDef>;
   spawns: Record<string, SpawnDef[]>;
   skills: SkillDef[];
+  items?: ItemDropRow[];
 }
 
 export interface GameConfigStatus {
@@ -121,6 +125,42 @@ export async function monsterTable(): Promise<Map<number, MonsterDef>> {
 export async function spawnTable(map: number): Promise<SpawnDef[]> {
   const cfg = await loadGameConfig();
   return cfg?.spawns?.[String(map)] ?? [];
+}
+
+/**
+ * 某只怪（按等级）能掉的东西 —— 照抄服务端 `CMonsterManager::InsertMonsterItem`：
+ *
+ *   掉落池 = 所有 `Drop != 0` 且 `物品等级 ∈ [怪物等级-2, 怪物等级+4]` 的物品
+ *
+ * 按等级缓存，同一张图的怪等级大多重复，一次算完反复用。
+ */
+const dropPoolCache = new Map<number, number[]>();
+
+export async function dropPool(monsterLevel: number): Promise<number[]> {
+  const hit = dropPoolCache.get(monsterLevel);
+  if (hit) return hit;
+  const cfg = await loadGameConfig();
+  const rows = cfg?.items ?? [];
+  const lo = monsterLevel - 2;
+  const hi = monsterLevel + 4;
+  const pool: number[] = [];
+  for (const [type, level, drop] of rows) {
+    // Level < 0 的物品服务端就不参与掉落（`ItemInfo.Level < 0` 直接跳过）
+    if (!drop || level < 0) continue;
+    if (level >= lo && level <= hi) pool.push(type);
+  }
+  /*
+   * 低等级怪（蜘蛛 Lv2 → 物品等级 [0,6]）池子可能很空，放宽到 ±10 兜底，
+   * 免得「打了半天什么都不掉」；放宽也找不到就返回空（不硬塞东西）。
+   */
+  if (!pool.length) {
+    for (const [type, level, drop] of rows) {
+      if (!drop || level < 0) continue;
+      if (level >= monsterLevel - 10 && level <= monsterLevel + 10) pool.push(type);
+    }
+  }
+  dropPoolCache.set(monsterLevel, pool);
+  return pool;
 }
 
 /** 技能表（45 条），后续战斗/技能面板用 */

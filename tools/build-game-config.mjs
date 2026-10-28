@@ -15,6 +15,7 @@
  *   Monster/Monster.txt        159 行：等级 / MaxLife / 攻防 / 掉落率 / 金钱 …
  *   Monster/MonsterSetBase.txt 1490 行：每张图的刷怪点（Mob Map Range X Y Dir）
  *   Skill/Skill.txt            45 行：伤害 / 耗蓝 / 范围
+ *   Item/Item.txt              393 行：只取「掉落判定」要的三列（等级 / 可掉 / 组·索引）
  *
  * 输出是**派生数据**：本地跑、结果入库（`server/data/game.json`），CI 不跑
  * （CI 里没有 MuServer）。
@@ -126,6 +127,44 @@ function parseSkills() {
   return out;
 }
 
+/**
+ * Item.txt：只取掉落判定要用的列。
+ *
+ * 服务端 `CMonsterManager::InsertMonsterItem` 的语义是：
+ *   「怪物等级 L 的掉落池 = 所有 `Drop != 0` 且 `Level ∈ [L-2, L+4]` 的物品」
+ * 所以这里存 `[type, level, drop]` 就够 —— 物品名/模型客户端自己有
+ * （`itemDisplayName` / `item.bmd`），不必重复塞进 JSON。
+ *
+ * 注意：这张表**不能**用 `readTable()`（它会丢掉空字段）。Item.txt 的行长不固定
+ * —— 名字后面有 5 个对齐用的空 tab、行尾的 0 又常被省略，丢空字段后同一列会漂移。
+ * 所以这里按 tab 硬切、按固定下标取：`[0]=Index [7]=Drop [14]=Level`。
+ *
+ * 组号是单独一行数字（`0` / `1` / … ，`end` 收尾），type = group * 32 + index。
+ */
+function parseItems() {
+  const text = readFileSync(join(SRC, 'Item/Item.txt'), 'utf8');
+  const out = [];
+  let group = 0;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('//')) continue;
+    const cols = line.split('\t');
+    // 组标记 / end：整行只有一列
+    if (cols.length === 1) {
+      if (/^end$/i.test(cols[0].trim())) continue;
+      const g = Number(cols[0].trim());
+      if (Number.isFinite(g)) group = g;
+      continue;
+    }
+    const index = num(cols[0]);
+    // Level 是「物品等级」（不是需求等级），服务端用它决定掉落池
+    const level = num(cols[14], -1);
+    const drop = num(cols[7]);
+    out.push([group * 32 + index, level, drop]);
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* 输出                                                                */
 /* ------------------------------------------------------------------ */
@@ -133,6 +172,7 @@ function parseSkills() {
 const monsters = parseMonsters();
 const spawns = parseSpawns();
 const skills = parseSkills();
+const items = parseItems();
 
 const payload = {
   meta: {
@@ -143,11 +183,14 @@ const payload = {
       spawns: Object.values(spawns).reduce((n, list) => n + list.length, 0),
       maps: Object.keys(spawns).length,
       skills: skills.length,
+      items: items.length,
+      droppable: items.filter(it => it[2] !== 0).length,
     },
   },
   monsters,
   spawns,
   skills,
+  items,
 };
 
 mkdirSync(dirname(OUT), { recursive: true });
