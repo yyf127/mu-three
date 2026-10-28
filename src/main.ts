@@ -5687,6 +5687,96 @@ async function loadWorld(
  */
 const demoMonsterDefs = new Map<object, MonsterDef>();
 
+/**
+ * 离线演示的「可攻击本地怪」。
+ *
+ * 联机时这一切由服务端下发（`remotes` 的 life/maxLife、0x15 伤害包）；演示没有服务端，
+ * 所以自己维护一份：id（900001 起，避开服务端 id）+ 当前/最大血量。
+ * `tryAttack` 的目标解析同时看 `remotes` 和这里 —— 两条线共用同一套挥砍流程。
+ */
+interface DemoTarget {
+  id: number;
+  actor: Actor;
+  def: MonsterDef;
+  hp: number;
+  maxHp: number;
+  x: number;
+  y: number;
+}
+
+const demoTargets = new Map<number, DemoTarget>();
+let demoNextTargetId = 900001;
+
+/** 离玩家最近的本地怪（服务端那边是 `remotes.nearestMonster`） */
+function nearestDemoTarget(x: number, y: number, range: number): DemoTarget | null {
+  let best: DemoTarget | null = null;
+  let bestDist = range;
+  for (const t of demoTargets.values()) {
+    if (t.hp <= 0) continue;
+    const d = Math.hypot(t.x - x, t.y - y);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  return best;
+}
+
+/**
+ * 离线演示的伤害结算：扣血 → 飘字 → 死亡给经验/金币/升级。
+ *
+ * 伤害是演示近似（原版在服务端 `AttackDamage()`，含攻速/幸运/Miss 等判定）；
+ * 经验 = 等级² × 1.6 + 等级 × 8（近似服务端曲线），金币取 `Monster.txt` 的 Money。
+ */
+function hitDemoTarget(t: DemoTarget) {
+  if (t.hp <= 0 || !demoTargets.has(t.id)) return;
+  const info = currentChar?.info;
+  const atk = info ? (info.strength + info.dexterity) * 0.9 : 40;
+  const dmg = Math.max(1, Math.round(atk * (0.85 + Math.random() * 0.3) - t.def.defense));
+  t.hp = Math.max(0, t.hp - dmg);
+
+  const gy = world ? world.terrain.getHeight(t.x, t.y) : 0;
+  damageTexts.spawn({ x: t.x, y: t.y, z: gy + 1.7 }, String(dmg), '');
+  if (t.hp > 0) return;
+
+  // ── 死亡：先从场上撤掉，再结算奖励 ──
+  demoTargets.delete(t.id);
+  const idx = monsters.indexOf(t.actor);
+  if (idx >= 0) monsters.splice(idx, 1);
+  t.actor.root.visible = false;
+  for (const mesh of t.actor.meshes) mesh.visible = false;
+
+  const exp = Math.max(1, Math.round(t.def.level * t.def.level * 1.6 + t.def.level * 8));
+  const zen = t.def.money;
+  let ups = 0;
+  if (info) {
+    info.experience += exp;
+    info.money += zen;
+    while (info.experience >= info.nextExperience && info.nextExperience > 0) {
+      info.experience -= info.nextExperience;
+      if (currentChar) currentChar.level += 1;
+      info.nextExperience = Math.round(info.nextExperience * 1.35);
+      info.strength += 2;
+      info.dexterity += 2;
+      info.energy += 1;
+      info.vitality += 1;
+      info.maxLife += 8;
+      info.life = info.maxLife;
+      ups++;
+    }
+    damageTexts.spawn({ x: t.x, y: t.y, z: gy + 2.0 }, `+${exp} EXP`, 'exp');
+    if (zen > 0) damageTexts.spawn({ x: t.x, y: t.y, z: gy + 2.5 }, `+${zen} Zen`, 'exp');
+    if (ups && player) {
+      damageTexts.spawn({ x: player.wx, y: player.wy, z: player.z + 2.6 }, 'LEVEL UP!', 'crit');
+    }
+    refreshHud();
+  }
+  console.log(
+    `[demo] 击杀 ${t.def.name} Lv${t.def.level} → +${exp} EXP / +${zen} Zen` +
+      (ups ? ` / 升级 → Lv${currentChar?.level}` : '')
+  );
+}
+
 /** 给调试/探针看「SQLite 连接线到底通没通」 */
 function gameConfigInfo() {
   const st = gameConfigStatus();
@@ -5772,6 +5862,17 @@ async function spawnDemoMonsters(baseX: number, baseY: number) {
         const def = table.get(sp.mob);
         if (def) {
           demoMonsterDefs.set(m, def);
+          // 注册成可攻击目标：血量取服务端 Monster.txt 的 MaxLife
+          const maxHp = Math.max(1, def.maxHp);
+          demoTargets.set(demoNextTargetId, {
+            id: demoNextTargetId++,
+            actor: m,
+            def,
+            hp: maxHp,
+            maxHp,
+            x: m.x,
+            y: m.y,
+          });
           withDef++;
         }
         monsters.push(m);
@@ -5950,6 +6051,7 @@ function clearMonsters() {
     for (const mesh of m.meshes) scene.remove(mesh);
   }
   monsters = [];
+  demoTargets.clear();
   for (const s of monsterShadows) {
     scene.remove(s.mesh);
     s.mesh.geometry.dispose();
@@ -7249,10 +7351,21 @@ function tryAttack(targetId = -1) {
   }
   restAction = 0; // 出手就把坐姿顶掉
 
-  const target =
+  /*
+   * 目标解析：两条线
+   *   - 联机：`remotes` 里服务端下发的实体（坐标字段 tx/ty）
+   *   - 离线演示：本地刷的怪（`demoTargets`，坐标字段 x/y），伤害在本地结算
+   * 这里把两者统一成 tx/ty，后面的走位/朝向/动作代码不用分叉。
+   */
+  const remote =
     targetId >= 0 ? remotes.get(targetId) : remotes.nearestMonster(player.x, player.y, ATTACK_RANGE);
+  const localT = remote
+    ? null
+    : targetId >= 0
+      ? (demoTargets.get(targetId) ?? null)
+      : nearestDemoTarget(player.x, player.y, ATTACK_RANGE);
 
-  if (!target) {
+  if (!remote && !localT) {
     // 空挥（没有目标也要有动作反馈），只在联机时不上报
     if (player.finished || player.action !== lastAttackAction) {
       lastAttackAction = attackAction(animInput(), attackCombo++);
@@ -7262,24 +7375,34 @@ function tryAttack(targetId = -1) {
     return;
   }
 
-  const dist = Math.hypot(target.tx - player.x, target.ty - player.y);
+  const tid = remote ? remote.id : localT!.id;
+  const tx = remote ? remote.tx : localT!.x;
+  const ty = remote ? remote.ty : localT!.y;
+
+  const dist = Math.hypot(tx - player.x, ty - player.y);
   if (dist > ATTACK_RANGE) {
     // 太远：记下来，先走位
-    pendingTargetId = target.id;
+    pendingTargetId = tid;
     return;
   }
 
   pendingTargetId = -1;
-  focusId = target.id;
+  focusId = tid;
 
-  const dx = target.tx - player.x;
-  const dy = target.ty - player.y;
+  const dx = tx - player.x;
+  const dy = ty - player.y;
   const yaw = Math.atan2(dy, dx) + MODEL_YAW_OFFSET;
 
   player.yaw = yaw;
   lastAttackAction = attackAction(animInput(), attackCombo++);
   player.play(lastAttackAction, false);
   attackCd = ATTACK_COOLDOWN;
+
+  /*
+   * 离线演示：本地结算伤害（延迟 120ms 对齐挥砍起手）。
+   * 联机不在这里算 —— 伤害数字等服务器 `0x15` 回包，客户端自己算会和服务端不一致。
+   */
+  if (localT) window.setTimeout(() => hitDemoTarget(localT), 120);
 
   /*
    * 挥砍音（`eSwingWeapon1/2`、`eSwingLightSword`、`eBow`、`eCrossbow`）。
@@ -7296,15 +7419,15 @@ function tryAttack(targetId = -1) {
    * 延迟 120 ms 等拉弓动作起手，再让箭离手。
    */
   if (isRangedWeapon()) {
-    const tx = target.tx + 0.5;
-    const ty = target.ty + 0.5;
-    const tz = (world ? world.terrain.getHeight(tx, ty) : 0) + 1.1;
-    window.setTimeout(() => shootArrows(1, { x: tx, y: ty, z: tz }), 120);
+    const ax = tx + 0.5;
+    const ay = ty + 0.5;
+    const tz = (world ? world.terrain.getHeight(ax, ay) : 0) + 1.1;
+    window.setTimeout(() => shootArrows(1, { x: ax, y: ay, z: tz }), 120);
   }
 
   if (loggedIn && connection?.connected) {
     const dir = dirFromDelta(Math.round(dx), Math.round(dy));
-    connection.send(buildAttackPacket(target.id, lastAttackAction, dir));
+    connection.send(buildAttackPacket(tid, lastAttackAction, dir));
   }
 }
 
@@ -13233,6 +13356,28 @@ function boot() {
           ...e,
           dist: player ? +Math.hypot(e.x - player.x, e.y - player.y).toFixed(2) : -1,
         })),
+    /** 离线演示刷出来的本地怪（服务端那套在 `monsters()` 里） */
+    demoMonsters: () =>
+      [...demoTargets.values()].map(t => ({
+        id: t.id,
+        name: t.def.name,
+        level: t.def.level,
+        hp: t.hp,
+        maxHp: t.maxHp,
+        x: +t.x.toFixed(1),
+        y: +t.y.toFixed(1),
+        dist: player ? +Math.hypot(t.x - player.x, t.y - player.y).toFixed(2) : -1,
+      })),
+    /** 当前经验和金币（演示击杀结算用） */
+    progress: () =>
+      currentChar?.info
+        ? {
+            level: currentChar.level,
+            exp: currentChar.info.experience,
+            next: currentChar.info.nextExperience,
+            money: currentChar.info.money,
+          }
+        : null,
     /** 攻击指定目标（不传就用当前锁定 / 最近的怪物） */
     attack: (id?: number) => {
       attackCd = 0;

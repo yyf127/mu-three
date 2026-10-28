@@ -4509,3 +4509,50 @@ MuServer/Data/*.txt  ──tools/build-game-config.mjs──►  server/data/gam
 | 浏览器 | `gameConfig: ready, 110837B, 4ms, counts{monsters:159,spawns:1490}` |
 | 出怪 | 视野内 16-35 只（随加载时刻），全部带服务端属性 |
 | `demo-probe`（本地 serve:gh） | 28/28 |
+
+# 阶段 CO：演示服能打怪了（本地血量 / 伤害 / 经验 / 金币）
+
+## 一、之前为什么打不了
+
+`tryAttack()` 只认 `remotes`（服务端下发的实体）：`remotes.nearestMonster()` / `remotes.get(id)`。
+离线演示的怪是本地 `monsters: Actor[]`，不在 remotes 里 —— 点怪只会空挥。
+
+## 二、改法：给本地怪一套「可攻击目标」
+
+```ts
+interface DemoTarget { id; actor; def; hp; maxHp; x; y }   // id 从 900001 起，避开服务端 id
+const demoTargets = new Map<number, DemoTarget>();
+```
+
+- 刷怪时按 `Monster.txt` 的 `MaxLife` 注册（无 `def` 的 NPC 不注册 → 打不了，符合原版）；
+- `tryAttack` 目标解析变成两条线：`remotes` 优先，其次 `demoTargets`，坐标统一成 tx/ty，
+  后面的走位/朝向/动作代码一行没改；
+- 命中：`hitDemoTarget()` 在挥砍后 120ms 结算 → 扣血 + 飘伤害数字；
+- 死亡：从 `demoTargets`/`monsters` 摘掉、模型隐藏、飘 `+EXP` / `+Zen`；
+- 经验 = `level² × 1.6 + level × 8`（近似服务端曲线），金币取 `Monster.txt` 的 `Money`；
+- 升级：`exp ≥ nextExperience` → `currentChar.level++`、`nextExperience × 1.35`、属性/HP 成长，
+  头顶飘 `LEVEL UP!`，HUD 立即刷新。
+
+联机路径完全不动：伤害数字仍等服务器 `0x15`，客户端不自己算。
+
+## 三、调试接口
+
+```js
+__MU_APP__.demoMonsters()   // [{id,name,level,hp,maxHp,x,y,dist}]  本地怪
+__MU_APP__.progress()       // {level,exp,next,money}
+__MU_APP__.attack(id)       // 打指定本地怪
+```
+
+## 四、验证
+
+本地 serve-gh 实测：
+
+```
+目标 Golden Archer Lv2 HP50/50 @130,127
+击杀 OK → +22 EXP / +200 Zen
+progress 前 {level:120, exp:0,      money:1234567}
+progress 后 {level:120, exp:22,     money:1234767}
+```
+
+`demo-probe` 28/28 未回归。**未做**：怪物血条（`worldTags` 目前只画 remotes）与掉落物品
+（`EventItemBag` 的 11 个包都是特殊怪，普通掉落要按 `item_rate` 自己生成）。
