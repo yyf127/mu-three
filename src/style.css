@@ -1,0 +1,4900 @@
+:root {
+  --gold: #d8b56a;
+  --gold-dim: #8b7340;
+  --panel: rgba(10, 9, 7, 0.72);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #05070a;
+  font-family: 'Trebuchet MS', 'Microsoft YaHei', system-ui, sans-serif;
+  color: #e9dcc0;
+  user-select: none;
+}
+
+/* 舞台：固定 4:3，随窗口等比缩放并居中（两侧留黑边） */
+#stage {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(100vw, calc(100vh * 4 / 3));
+  height: min(100vh, calc(100vw * 3 / 4));
+  overflow: hidden;
+  background: #000;
+}
+
+#app,
+canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/*
+ * 水下滤镜（亚特兰蒂斯）。
+ *
+ * 原版是 `Terrain_Render` 里的 `color_underwater` —— 给整屏叠一层蓝绿。
+ * 这里用一层纯 DOM：`pointer-events: none` 不影响拾取，`mix-blend-mode`
+ * 不加（multiply 会把画面压死），只用半透明色 + 一圈暗角模拟"水里的可见度"。
+ */
+#water-tint {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  display: none;
+  z-index: 3;
+  background:
+    radial-gradient(
+      ellipse at 50% 45%,
+      rgba(24, 96, 120, 0.14) 0%,
+      rgba(12, 62, 92, 0.42) 62%,
+      rgba(4, 26, 44, 0.55) 100%
+    );
+}
+
+/* ---------------- 启动画面 / 载入画面 ---------------- */
+
+/*
+ * 两屏都是 640×480 逻辑层（`.mu-layer`）里的绝对定位块，坐标直接抄源码：
+ *
+ *   启动  `Scene_Intro.cpp`   Webzenlogo (192, 142.5) 256×195
+ *                             Everyone   (520, 0)     120×60
+ *   读条  `Scene_Loading.cpp` Loading01  (0,   100) 256×256
+ *                             Loading02  (256, 100) 128×256
+ *                             Loading03  (384, 100) 256×256
+ *
+ * 贴图由 `src/ui/splash.ts` 取 OZJ 后塞成背景图，这里只负责位置和黑底。
+ */
+#intro,
+#loading {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  z-index: 40;
+  overflow: hidden;
+}
+
+#intro {
+  /* 原版 glClear 之后就是纯黑，没有任何渐变 */
+  transition: opacity 0.4s ease;
+}
+
+#intro.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#intro .intro-logo,
+#intro .intro-esrb {
+  position: absolute;
+  display: none; /* 图没到位前不占位（`splash.ts` 取到就设 block） */
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  background-size: 100% 100%;
+}
+
+/* ---------------- 载入界面 ---------------- */
+
+#loading {
+  z-index: 20;
+  transition: opacity 0.6s ease;
+}
+
+#loading.fade-out {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#loading .ld-tile {
+  position: absolute;
+  display: none;
+  background-repeat: no-repeat;
+  background-position: 0 0;
+  background-size: 100% 100%;
+  /* 原版是 glClear 之后直接贴图，不加深浅；这里也不做暗角 */
+}
+
+/*
+ * 进度条原版没有 —— 那一屏只画一帧就进游戏了（资产早加载完）。
+ * 网页端进图要解 BMD 和地形，会停十几秒，所以在图片（y=100..356）下面
+ * 补一条 384 宽、居中在 x=128，做成原版 UI 那种细长的铜色条。
+ */
+#loading .ld-bar {
+  position: absolute;
+  left: 128px;
+  top: 372px;
+  width: 384px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(216, 181, 106, 0.35);
+  overflow: hidden;
+}
+
+#loading .fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #8b7340, var(--gold));
+  transition: width 0.25s ease;
+}
+
+#loading .msg {
+  position: absolute;
+  left: 128px;
+  top: 384px;
+  width: 384px;
+  text-align: center;
+  font-size: 12px;
+  color: #a99c85;
+  letter-spacing: 1px;
+  line-height: 16px;
+}
+
+#loading #btn-cancel-load {
+  position: absolute;
+  left: 290px;
+  top: 410px;
+  width: 60px;
+}
+
+/* ---------------- HUD ---------------- */
+
+#hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10;
+  transition: opacity 0.8s ease;
+}
+
+#hud.hidden {
+  opacity: 0;
+}
+
+.hud-top-right {
+  position: absolute;
+  top: 18px;
+  right: 22px;
+  text-align: right;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #7f7666;
+  letter-spacing: 1px;
+}
+
+/* 右上角的「声音 开/关」：小、暗、不抢视线 */
+.stat-btn {
+  margin-top: 4px;
+  padding: 1px 6px;
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #8a8170;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid #3a352b;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.stat-btn:hover {
+  color: var(--gold);
+  border-color: var(--gold);
+}
+
+#stat-fps {
+  color: var(--gold);
+}
+
+.hud-bottom-right {
+  position: absolute;
+  right: 22px;
+  bottom: 20px;
+  text-align: right;
+  font-size: 11px;
+  line-height: 1.9;
+  color: #7f7666;
+  letter-spacing: 1px;
+}
+
+.hud-bottom-right b {
+  color: var(--gold);
+  font-weight: 600;
+}
+
+/* ---------------- 底栏数值（HP/MP 球 / 经验 / AG / 角色名 / 坐标） ---------------- */
+/*
+ * 坐标全部照抄 0.97 客户端（见 src/ui/hudValues.ts 头注释），
+ * 这一层只有 640×480 的绝对定位，缩放交给 UiLayer。
+ */
+
+.hud-values {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+/*
+ * 聊天框。坐标全部来自客户端源码：
+ *   行 x = 186 + 10 = 196，行 y = 420 - 13*row - 16，行高 13，共 6 行
+ *   输入条 Dialogue1/2 各 134×29，分别在 (186,415) 与 (320,415)
+ * 不能给整层加背景：原版这三行字是直接压在世界画面上的。
+ */
+.chat-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  pointer-events: none;
+  z-index: 9;
+}
+
+.chat-log {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+}
+
+/*
+ * 一行消息。字**和左上角的事件列表（`.evt-line`）保持同一套**：
+ * 宋体 11px/13px + `1px 1px` 阴影 + 轻微外发光。
+ *
+ * 之前是 Tahoma 12px/13px：西文没问题，但中文会走回退字体，
+ * 字面 12px 塞进 13px 的行盒里被 `overflow:hidden` 裁掉上下沿，看着像"糊了/乱码"。
+ * 换宋体 11px 之后字面 11px < 行高 13px，中英文都不裁。
+ */
+.chat-line {
+  position: absolute;
+  height: 13px;
+  line-height: 13px;
+  max-width: 250px;
+  padding: 0 1px;
+  overflow: hidden;
+  white-space: pre;
+  font: 11px/13px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  text-shadow: 1px 1px 0 #000, 0 0 3px #000;
+}
+
+.chat-who {
+  font-weight: 700;
+}
+
+.chat-panels {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+}
+
+.chat-panels .chat-panel {
+  position: absolute;
+  image-rendering: pixelated;
+}
+
+/* 真正的输入控件，压在左格底板上；边框/背景都去掉，看起来像原版直接画的字 */
+.chat-input {
+  position: absolute;
+  width: 122px;
+  height: 17px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #c8dce6;
+  caret-color: #ffffff;
+  font: 11px/17px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  pointer-events: auto;
+  z-index: 2;
+}
+
+/* 球体：外层裁切 + 内层 clip-path 顶部，等价于原版的「液面下降」 */
+.hv-orb {
+  position: absolute;
+  overflow: hidden;
+}
+
+.hv-orb .hv-orb-img {
+  position: absolute;
+  left: 0;
+  top: 0;
+  clip-path: inset(var(--clip, 0%) 0 0 0);
+}
+
+/* 位图数字：Fonttest.ozt 是 256×32、16 格 16×16，用 mask 染色 */
+/*
+ * 底栏数字。原版是位图字体（Fonttest.ozt 16×16 一格），这里用 Tahoma 粗体近似 ——
+ * CSS mask 和 canvas 两条路都试过，属性/像素数据全对但合成不进画面，
+ * 最后退回 DOM 文本保证可见。字号/描边按位图字体的观感调。
+ */
+.bm-num {
+  position: absolute;
+  transform: translateX(-50%);
+  font: 700 11px/10px Tahoma, 'Microsoft YaHei', sans-serif;
+  color: #fff2bf;
+  text-shadow:
+    1px 0 0 #000,
+    -1px 0 0 #000,
+    0 1px 0 #000,
+    0 -1px 0 #000;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.bm-digit {
+  flex: none;
+  /* 原版 RenderNumber2D 逐位步进 Width*0.7 → 9px 字宽时前一位压 2.7px */
+  margin-right: -2.7px;
+  background: currentColor;
+  -webkit-mask-image: var(--mask);
+  mask-image: var(--mask);
+  -webkit-mask-size: var(--ms, 144px 20px);
+  mask-size: var(--ms, 144px 20px);
+  -webkit-mask-position: var(--dx, 0) 0;
+  mask-position: var(--dx, 0) 0;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.8));
+}
+
+.bm-digit:last-child {
+  margin-right: 0;
+}
+
+/* 药水快捷槽里的物品图标（BMD 离屏渲染出来的） */
+.hv-quick-icon {
+  position: absolute;
+  image-rendering: pixelated;
+  z-index: 2;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.85));
+}
+
+/* 球体悬停提示（原版 RenderTipText：黑底白字，贴在球上方 y=419） */
+.hv-tip {
+  position: absolute;
+  padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.92);
+  border: 1px solid #4a4436;
+  color: #e9e4d8;
+  font: 10px/13px Tahoma, 'Microsoft YaHei', sans-serif;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 7;
+}
+
+.hv-tip.hidden {
+  display: none;
+}
+
+/* 背包格子右上方的堆叠数（只有 448..456 的药水才画，原版 RenderNumber2D(9×10)） */
+.inv-count {
+  position: absolute;
+  transform: translateX(-50%);
+  font: 700 9px/10px Tahoma, sans-serif;
+  color: #ffe6b3;
+  text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000;
+  pointer-events: none;
+  z-index: 3;
+}
+
+/* 经验条（原版颜色 0.92,0.80,0.34） */
+.hv-exp-fill {
+  position: absolute;
+  z-index: 2;
+  background: #ebcc57;
+  box-shadow: 0 0 4px rgba(235, 204, 87, 0.5);
+}
+
+/*
+ * AG（Stamina）竖槽 15×36 @ (551,437)，贴图 Menu03_new_ag.ozj。
+ * 液面方向和 HP 球一致：整体贴图不吃缩放，只从**顶部**裁掉「空」的那一截，
+ * 等价原版 GL_DrawTexture(257, 551, 473-h, 15, h, 0, 0, 0.9375, h/64)。
+ */
+.hv-ag {
+  position: absolute;
+  overflow: hidden;
+  z-index: 2;
+  pointer-events: auto;
+}
+
+.hv-ag .hv-ag-img {
+  position: absolute;
+  left: 0;
+  top: 0;
+  clip-path: inset(var(--agclip, 0%) 0 0 0);
+}
+
+/* 角色名 / 坐标：塞进 Menu01_new 左下的凹槽（逻辑 10,457 起 85×22） */
+.hv-name,
+.hv-place {
+  position: absolute;
+  left: 11px;
+  width: 83px;
+  overflow: hidden;
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-family: Tahoma, 'Microsoft YaHei', sans-serif;
+  letter-spacing: 0;
+  text-shadow: 0 1px 0 #000, 0 0 2px #000;
+  z-index: 2;
+}
+
+.hv-name {
+  top: 458px;
+  font-size: 8px;
+  line-height: 9px;
+  font-weight: 700;
+  color: #f0d79a;
+}
+
+.hv-place {
+  top: 469px;
+  font-size: 7px;
+  line-height: 8px;
+  color: #a8bdd0;
+}
+
+/* ---------------- 登录 / 选角 ---------------- */
+
+.screen {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * 天空图由 main.ts 用 assetUrl() 注入（跟 base 走，GH Pages 子路径才对）。
+   * 注意用 longhand：`background: … , var(--mu-sky) center/cover no-repeat`
+   * 这种简写里带 var() 时，替换后的值会被判成整体无效（整条声明作废 → 背景全丢）。
+   */
+  background-color: #030508;
+  background-image: radial-gradient(circle at 50% 32%, rgba(12, 20, 30, 0.12), rgba(3, 5, 8, 0.82) 72%),
+    var(--mu-sky, none);
+  background-position: center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  z-index: 15;
+}
+
+.screen.hidden {
+  display: none;
+}
+
+.panel {
+  width: min(360px, 88vw);
+  padding: 30px 28px 24px;
+  background: rgba(14, 15, 19, 0.86);
+  border: 1px solid rgba(216, 181, 106, 0.42);
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.65), inset 0 0 60px rgba(216, 181, 106, 0.05);
+  backdrop-filter: blur(6px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.panel.wide {
+  width: min(680px, 92vw);
+}
+
+.panel .logo {
+  font-size: 34px;
+  letter-spacing: 5px;
+  font-weight: 700;
+  color: var(--gold);
+  text-shadow: 0 0 22px rgba(216, 181, 106, 0.4);
+  text-align: center;
+}
+
+.panel .logo span {
+  font-size: 15px;
+  letter-spacing: 2px;
+  margin-left: 6px;
+  color: #c8b28a;
+  font-weight: 400;
+}
+
+.panel-sub {
+  text-align: center;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #8a7f6a;
+  margin-bottom: 4px;
+}
+
+.panel-title {
+  font-size: 18px;
+  letter-spacing: 3px;
+  color: var(--gold);
+  text-align: center;
+  margin-bottom: 6px;
+}
+
+.field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.field span {
+  width: 40px;
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: #a99c85;
+}
+
+.field input {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(216, 181, 106, 0.28);
+  color: #f0e6d0;
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 11px;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.field input:focus {
+  border-color: rgba(216, 181, 106, 0.75);
+}
+
+button {
+  font: inherit;
+  font-size: 13px;
+  letter-spacing: 2px;
+  padding: 10px 14px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: filter 0.2s ease, background 0.2s ease;
+}
+
+button.primary {
+  background: linear-gradient(180deg, #8b7340, #5c4b28);
+  border-color: rgba(216, 181, 106, 0.7);
+  color: #fff6e2;
+  font-weight: 600;
+}
+
+button.primary:hover {
+  filter: brightness(1.15);
+}
+
+button.primary:disabled {
+  filter: grayscale(0.7) brightness(0.7);
+  cursor: default;
+}
+
+button.ghost {
+  background: transparent;
+  border-color: rgba(216, 181, 106, 0.28);
+  color: #b8a98c;
+}
+
+button.ghost:hover {
+  background: rgba(216, 181, 106, 0.08);
+}
+
+button.small {
+  padding: 6px 10px;
+  font-size: 11px;
+}
+
+.panel-msg {
+  font-size: 11px;
+  line-height: 1.6;
+  color: #8a7f6a;
+  letter-spacing: 0.5px;
+  min-height: 17px;
+}
+
+.panel-msg.error {
+  color: #e5695b;
+}
+
+.panel-msg.ok {
+  color: #6ee06e;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#loading .hint + button {
+  margin-top: 6px;
+}
+
+/* 统一隐藏：登录/选角/载入/HUD 都用 hidden 切换 */
+.hidden {
+  display: none !important;
+}
+
+/* ---------------- 目标信息 / 伤害飘字 ---------------- */
+
+.hud-top-center {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.target {
+  min-width: 220px;
+  padding: 7px 12px 8px;
+  background: rgba(8, 8, 10, 0.62);
+  border: 1px solid rgba(216, 181, 106, 0.3);
+  text-align: center;
+}
+
+.target-name {
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: #f0e6d0;
+  text-shadow: 0 1px 3px #000;
+  margin-bottom: 5px;
+}
+
+.target-bar {
+  height: 5px;
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(216, 181, 106, 0.22);
+  overflow: hidden;
+}
+
+.target-fill {
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #a3241c, #e0503c);
+  transition: width 0.16s linear;
+}
+
+/* 飘字层不能挡鼠标 */
+#fx {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 12;
+}
+
+.dmg {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #ffe27a;
+  text-shadow: 0 0 6px rgba(0, 0, 0, 0.95), 0 2px 3px #000;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+
+.dmg.crit {
+  font-size: 19px;
+  color: #ff8a4c;
+}
+
+.dmg.exp {
+  font-size: 12px;
+  color: #8fd8ff;
+}
+
+.dmg.hurt {
+  color: #ff6b5e;
+}
+
+/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* 小地图（MiniMap.OZT 边框 + canvas 视口）                             */
+/* ------------------------------------------------------------------ */
+
+.minimap {
+  position: absolute;
+  /* 边框是 151×173 的 OZT，整张拉伸到面板大小（和原版 RenderBitmap 一致） */
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  pointer-events: none;
+  /* 比其它面板低一层：小地图不该盖住背包/人物面板 */
+  z-index: 3;
+  /* 尺寸基准仍是 151×173，整体缩到 0.8 由 transform 做（内部坐标不用动） */
+  transform-origin: 0 0;
+}
+
+.minimap-view {
+  position: absolute;
+  /*
+   * 尺寸要和 src/ui/minimapPanel.ts 的 VIEW_W/VIEW_H 一致（112×112）。
+   * **必须显式写**：上面有一条全局 `canvas { width:100%; height:100% }`
+   * （给 3D 主画布用的），不覆盖的话小地图会被拉成整个面板大小、
+   * 位置也会偏到 (0,0)。
+   */
+  width: 112px;
+  height: 112px;
+  /* 像素图放大必须保留硬边，不然地图会糊成一团 */
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.minimap-title {
+  position: absolute;
+  left: 34px;
+  top: 57px;
+  /* canvas 在 DOM 里排在前面但会盖住绝对定位的兄弟，得显式抬一层 */
+  z-index: 2;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: 0.4px;
+  color: #e8dcc0;
+  /* 四向描边：冰风谷这种雪地图是纯白的，只靠投影会糊成一片 */
+  text-shadow:
+    -1px 0 #000, 1px 0 #000, 0 -1px #000, 0 1px #000,
+    0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+.minimap-coord {
+  position: absolute;
+  right: 34px;
+  bottom: 30px;
+  z-index: 2;
+  font-size: 9px;
+  line-height: 10px;
+  color: #cfc6ae;
+  text-shadow: -1px 0 #000, 1px 0 #000, 0 -1px #000, 0 1px #000;
+  pointer-events: none;
+}
+
+/* 边框右上角那个圆形放大镜：点它切缩放档位 */
+.minimap-zoom {
+  position: absolute;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.minimap-zoom:hover {
+  background: rgba(255, 226, 160, 0.16);
+}
+
+/* ------------------------------------------------------------------ */
+/* 地面物品名（原版 RenderItemName / Target_Render）                   */
+/* ------------------------------------------------------------------ */
+
+.item-label {
+  position: absolute;
+  /* 锚点「底边中心」= 物品/鼠标上方那一点（源码是 y - 15） */
+  transform: translate(-50%, -100%);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.item-label-text {
+  font: 11px/13px 'SimSun', '宋体', 'MS Song', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  letter-spacing: 0.2px;
+  /* 颜色由 JS 按品级写行内样式（groundItemLabelOf） */
+  color: #b3b3b3;
+  /* 原版文字带 1px 黑描边（RenderText 的 SIZE=3 就是描边宽度） */
+  text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000, 0 0 3px rgba(0, 0, 0, 0.8);
+}
+
+/* 悬停 / Alt 下当前指着的那一条：提亮一档，方便在堆里认出来 */
+.item-label.focused .item-label-text {
+  font-size: 12px;
+  line-height: 14px;
+  text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000, 0 0 6px rgba(0, 0, 0, 0.9);
+}
+
+/* ------------------------------------------------------------------ */
+/* 世界空间标签：头顶名字 + 队伍成员 10 格血条                          */
+/*  几何/颜色全部照 0.97 的 Render_HPBars / Render_CharNameTags        */
+/* ------------------------------------------------------------------ */
+
+.wtag {
+  position: absolute;
+  /* 锚点是「底边中心」= 角色头顶那一点 */
+  transform: translate(-50%, -100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.wtag-name {
+  font-size: 11px;
+  line-height: 1.15;
+  letter-spacing: 0.3px;
+  color: #ded7c6;
+  text-shadow: 0 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.85);
+}
+
+/* 队伍成员：名字提亮 */
+.wtag-name.self-party {
+  color: #ffe6a8;
+}
+
+/* 当前目标（怪物）：原版用 `0xFFC8E6FF` 那档冷色 */
+.wtag-name.focused {
+  color: #c8e6ff;
+  text-shadow: 0 0 6px rgba(40, 90, 170, 0.9), 0 1px 2px #000;
+}
+
+/* 42×5，暗红底 + 1px 右下投影（源码 GL_DrawRect(sx+1, sy+1, 42, 5) 那块阴影） */
+.wtag-bar {
+  position: relative;
+  background: rgb(51, 0, 0);
+  box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.5);
+}
+
+/* 源码在 (sx+2, sy+2) 画的 38×1 暗条，格子之间能透出来 */
+.wtag-bar::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 38px;
+  height: 1px;
+  background: rgb(50, 8, 0);
+}
+
+/* 10 段 3×2 的红格，步距 4px */
+.wtag-seg {
+  position: absolute;
+  background: rgb(253, 8, 0);
+  z-index: 1;
+}
+
+/*
+ * 怪物血条：一条实心填充（宽度 = 血量比，颜色由 JS 按比例给 hsl）。
+ * 底还是 `.wtag-bar` 那条暗红，和队友的十格条共用外框尺寸，视觉上是一套。
+ */
+.wtag-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 1;
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.55);
+  transition: width 0.12s linear;
+}
+
+/* 怪物名字：比玩家稍暖一点，和蓝冷色的「当前目标」区分开 */
+.wtag-name.foe {
+  color: #e8d2b0;
+}
+
+#stat-ents {
+  font-size: 10px;
+  color: #7d7362;
+  letter-spacing: 0.5px;
+}
+
+/* ================================================================
+   原版 UI 层（640×480 逻辑坐标）
+   ----------------------------------------------------------------
+   坐标全部是客户端源码里的绝对值，所以这一层不做响应式重排 ——
+   整层 transform: scale() 到舞台宽度，1 单位 == 原版 1 像素。
+   ================================================================ */
+
+#mu-ui {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  transform-origin: 0 0;
+  /* 空白处不吃鼠标，否则 3D 画面就点不动了 */
+  pointer-events: none;
+  /* 盖在 #hud（10）之上：原版面板是右侧满高的，不能被人名/坐标压住 */
+  z-index: 12;
+}
+
+#mu-ui.hidden {
+  display: none;
+}
+
+#mu-ui .ui-sprite {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+}
+
+/* ---------------- 背包面板 ---------------- */
+
+.inv-panel {
+  position: absolute;
+  pointer-events: auto;
+  /* 和属性面板同理：要压在底栏角饰（y=387 起）之上 */
+  z-index: 10;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+}
+
+/*
+ * 分层：底板是后挂上去的（骨架先建、贴图后到），不给 z-index 会把格子整个盖住。
+ * 原版的绘制顺序是 底板 → 装备槽 → 格子 → 物品 → 金币 → 文字，这里照抄。
+ */
+.inv-panel > .inv-plate { z-index: 0; }
+.inv-equip { z-index: 1; }
+.inv-grid { z-index: 2; }
+.inv-money { z-index: 3; }
+.inv-title,
+.inv-close { z-index: 4; }
+
+.inv-panel.hidden {
+  display: none;
+}
+
+.inv-plate {
+  pointer-events: none;
+}
+
+.inv-title {
+  position: absolute;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: #f2e6c8;
+  text-shadow: 1px 1px 0 #000, -1px -1px 0 #000;
+  pointer-events: none;
+}
+
+.inv-close {
+  position: absolute;
+  cursor: pointer;
+  image-rendering: pixelated;
+  opacity: 0.92;
+}
+
+.inv-close:hover {
+  opacity: 1;
+  filter: brightness(1.15);
+}
+
+/* 装备槽 */
+
+.inv-equip {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.inv-equip-slot {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.equip-ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  /* 原版占位图是灰白剪影，压在暗底上偏冷 */
+  opacity: 0.9;
+}
+
+.equip-icon {
+  position: absolute;
+  left: 0;
+  top: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.inv-equip-slot.equipped .equip-ghost {
+  opacity: 0.25;
+}
+
+.inv-equip-slot:hover {
+  outline: 1px solid rgba(255, 214, 150, 0.5);
+  outline-offset: -1px;
+}
+
+/* 8×8 格子 */
+
+.inv-grid {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.inv-cell {
+  position: absolute;
+  pointer-events: auto;
+}
+
+.inv-cell .cell-bg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0.95;
+}
+
+.inv-cell.taken .cell-bg {
+  opacity: 1;
+}
+
+.inv-cell:hover {
+  outline: 1px solid rgba(255, 214, 150, 0.55);
+  outline-offset: -1px;
+}
+
+.inv-item-icon {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2;
+  filter: drop-shadow(1px 1px 1px rgba(0, 0, 0, 0.65));
+}
+
+.inv-item-icon.missing {
+  background: radial-gradient(circle, #d8b56a 0%, #6b5326 70%);
+  border-radius: 2px;
+}
+
+/* 金币条 */
+
+.inv-money {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.inv-money-strip {
+  position: absolute;
+}
+
+.inv-money-label {
+  position: absolute;
+  left: -31px;
+  top: 2px;
+  width: 28px;
+  text-align: right;
+  font-size: 11px;
+  line-height: 14px;
+  color: #96dcff;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.inv-money-value {
+  position: absolute;
+  left: 10px;
+  top: 2px;
+  font-size: 11px;
+  line-height: 14px;
+  color: #96dcff;
+  text-shadow: 1px 1px 0 #000;
+}
+
+/* 物品提示 */
+
+.ui-tip {
+  position: absolute;
+  padding: 1px 5px;
+  background: #000;
+  border: 1px solid #4a4436;
+  color: #fff;
+  font: 11px/14px 'SimSun', '宋体', serif;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.ui-tip.hidden {
+  display: none;
+}
+
+/* 词条行：物品表里的攻/防/耐久 + 装备需求 */
+.ui-tip .tip-name {
+  color: #f0d79a;
+  font-weight: 700;
+}
+
+.ui-tip .tip-stat {
+  color: #cfd8e3;
+  font-size: 10px;
+}
+
+.ui-tip .tip-req {
+  color: #9aa7b8;
+  font-size: 10px;
+}
+
+.ui-tip .tip-req.lack {
+  color: #ff8a6a;
+}
+
+/* 职业限制行：`GlobalText[61]`「%s 可以使用」 */
+.ui-tip .tip-cls {
+  color: #c8d4e2;
+  font-size: 10px;
+}
+
+/* 当前职业用不了的，标红（原版给这一行加深红底，这里用文字色代替） */
+.ui-tip .tip-cls.lack {
+  color: #ff8a6a;
+}
+
+/* 服务端 F3/E4 价格表推过来的「售价」（原版 tooltip 也有这一行） */
+.ui-tip .tip-price {
+  color: #d8b56a;
+  font-size: 10px;
+}
+
+/* 服务端 F3/E3 堆叠上限 */
+.ui-tip .tip-stack {
+  color: #8fb6d8;
+  font-size: 10px;
+}
+
+/* 服务端拒绝移动时的提示条 */
+.inv-toast {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  width: 174px;
+  padding: 2px 4px;
+  background: rgba(40, 8, 8, 0.92);
+  border: 1px solid #7a3030;
+  color: #ffb0a0;
+  font: 11px/14px 'SimSun', '宋体', serif;
+  text-align: center;
+  pointer-events: none;
+  z-index: 7;
+}
+
+.inv-toast.hidden {
+  display: none;
+}
+
+/* 拖拽中：影子跟手，原格子保留但压暗一点，落点高亮 */
+.inv-drag-ghost {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 9999;
+  pointer-events: none;
+  image-rendering: pixelated;
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.9));
+  opacity: 0.92;
+}
+
+/* 没有图标时的拖拽占位（别让玩家拖着一个透明的空盒子） */
+.inv-drag-ghost.no-icon {
+  background:
+    radial-gradient(circle at 50% 45%, rgba(255, 214, 128, 0.55), rgba(90, 68, 26, 0.85) 70%),
+    #1a1509;
+  box-shadow: 0 0 6px rgba(255, 200, 96, 0.5);
+}
+
+.inv-panel.dragging {
+  cursor: grabbing;
+}
+
+.inv-cell.drop-hover,
+.inv-equip-slot.drop-hover {
+  outline: 1px solid rgba(255, 226, 140, 0.95);
+  outline-offset: -1px;
+  background: rgba(255, 214, 120, 0.18);
+}
+
+/* ---------------- 角色属性面板 ---------------- */
+/*
+ * 和背包共用同一块右侧底板（原版 RenderInventoryInterface 就是这一套
+ * Item_Back01/02），所以面板本体只要定位 + 分层，不需要新素材。
+ */
+
+.chr-panel {
+  position: absolute;
+  pointer-events: auto;
+  /*
+   * 必须压在底栏（z-index 5）之上：面板高 433，而底栏两个角饰从 y=387
+   * 就开始了，原版也是先画底栏再画面板，不然角饰会盖住面板底部。
+   */
+  z-index: 10;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e6e6e6;
+}
+
+.chr-panel.hidden {
+  display: none;
+}
+
+/* 底板是异步后挂上去的，必须显式压到最下，否则会盖住所有文字 */
+.chr-panel > .chr-plate { z-index: 0; }
+.chr-row-bg { z-index: 0; }
+.chr-text { z-index: 2; }
+.chr-title,
+.chr-class,
+.chr-plus,
+.chr-close { z-index: 3; }
+
+.chr-plate,
+.chr-row-bg {
+  pointer-events: none;
+}
+
+.chr-title {
+  position: absolute;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  color: #f2e6c8;
+  text-shadow: 1px 1px 0 #000, -1px -1px 0 #000;
+  pointer-events: none;
+}
+
+/*
+ * 职业名。原版这里是职业名和「服务器 - 频道」两条文本按
+ *   pulse = sin(t) + 1;  alpha_class = 2 - pulse;  alpha_zone = pulse
+ * 互相淡入淡出（周期 2π 秒）。服务端没把服务器名发过来，所以只画职业名，
+ * 保留同样的字号和位置，不做幽灵交替。
+ */
+.chr-class {
+  position: absolute;
+  height: 16px;
+  line-height: 16px;
+  font-size: 11px;
+  font-weight: bold;
+  color: #cfd8e3;
+  white-space: nowrap;
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
+/* 文本行：行高锁死，避免不同字号把 60px 的行距顶歪。
+   字号按原版来的（640×480 基线上 8~9px），换英文长句时才塞得进 130px 的裁切宽。 */
+.chr-text {
+  position: absolute;
+  height: 12px;
+  line-height: 12px;
+  font-size: 9px;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;
+  /* 原版 m_dwBackColor 是半透明黑底，紧跟文字宽度 */
+  display: inline-block;
+  width: auto;
+  padding: 0 2px;
+  box-sizing: border-box;
+}
+
+.chr-text.bold {
+  font-weight: bold;
+}
+
+.chr-text:empty {
+  display: none;
+}
+
+/* 加号按钮：24×24，命中框和原版 sub_4E5DE0 完全一致 */
+.chr-plus {
+  position: absolute;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.chr-plus img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+.chr-plus:hover {
+  filter: brightness(1.25);
+}
+
+.chr-close {
+  position: absolute;
+  cursor: pointer;
+  pointer-events: auto;
+  opacity: 0.9;
+}
+
+.chr-close:hover {
+  opacity: 1;
+}
+
+/* ---------------- 底栏 ---------------- */
+
+/*
+ * 底栏常驻（进图就有），坐标全在 640×480 逻辑层里：
+ * 角饰 y=387、三段贴图 y=432 高 48。整体不吃鼠标，只有按钮吃。
+ */
+.bottom-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  pointer-events: none;
+  /* 面板是 z-index 12 里的兄弟节点，底栏要在面板之上时靠 DOM 顺序 */
+  z-index: 5;
+}
+
+.bottom-bar.hidden {
+  display: none;
+}
+
+.bar-tile,
+.bar-corner {
+  pointer-events: none;
+}
+
+/*
+ * 底栏按钮 = 「常驻命中框 + 按需显示的图标」。
+ *
+ * 原版（`HUD_Pass5.cpp:308-338`）是 `if (XxxOpened) GL_DrawTexture(...)` ——
+ * 面板没开时底栏上**只有凹槽底纹，没有图标**。之前这里常亮四个图标，
+ * 和 Win 端明显不一样。
+ *
+ * hover 时给 35% 的淡影：原版靠 `RenderTipText` 的文字提示，我们没有那套
+ * tooltip，用一点透明度当可点提示，视觉上仍然接近「没有图标」。
+ */
+.bar-btn {
+  position: absolute;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.bar-btn img {
+  opacity: 0;
+  transition: opacity 0.08s;
+  display: block;
+}
+
+.bar-btn:hover img {
+  opacity: 0.35;
+}
+
+.bar-btn.active img {
+  opacity: 1;
+  filter: drop-shadow(0 0 3px rgba(255, 214, 130, 0.85));
+}
+
+/* ---------------- 技能栏 ---------------- */
+
+/*
+ * 坐标全部来自 `HUD_Pass5.cpp:341-386`：主图标 (304,444) 32×36，
+ * 展开的一排 y=370、x = 320 - count*16 + i*32，图标 32×36。
+ * 这一层压在底栏（z-index 5）之上、面板（10/12）之下 —— 原版也是先画 HUD 再画面板。
+ */
+.skill-bar {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.skill-row {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  pointer-events: none;
+}
+
+.skill-cell,
+.skill-main {
+  position: absolute;
+  padding: 0;
+  margin: 0;
+  width: 32px;
+  height: 36px;
+  overflow: hidden;
+  background: none;
+  border: none;
+  cursor: pointer;
+  pointer-events: auto;
+  /* 原版用 GL_NEAREST 采样图集，这里同样关掉插值 */
+  image-rendering: pixelated;
+}
+
+.skill-cell:hover {
+  filter: drop-shadow(0 0 4px rgba(255, 226, 150, 0.9));
+}
+
+/* 图集切片：背景尺寸保持 256×256 原始大小，靠 background-position 取格子 */
+.skill-art {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 32px;
+  height: 36px;
+  background-repeat: no-repeat;
+  background-size: 256px 256px;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+/* 非主技能压暗：等价于原版 glColor3f(0.6, 0.7, 0.8) 的叠乘 */
+.skill-dim {
+  position: absolute;
+  inset: 0;
+  background: rgb(153, 178, 204);
+  mix-blend-mode: multiply;
+  pointer-events: none;
+}
+
+/* 快捷键数字：原版 RenderNumber2D(x + dx, y + dy, hotkey, 9, 10) —— 贴在格子左下 */
+.skill-key {
+  position: absolute;
+  left: 1px;
+  bottom: 0;
+  font: 10px/10px 'SimSun', '宋体', serif;
+  color: #f4e7c4;
+  text-shadow: 1px 1px 0 #000, 0 0 3px #000;
+  pointer-events: none;
+}
+
+.skill-main.is-open .skill-art {
+  filter: drop-shadow(0 0 3px rgba(255, 214, 130, 0.8));
+}
+
+.skill-tip {
+  position: absolute;
+  padding: 1px 5px;
+  background: #000;
+  border: 1px solid #4a4436;
+  color: #fff;
+  font: 11px/14px 'SimSun', '宋体', serif;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 7;
+}
+
+/* ------------------------------------------------------------------ */
+/* 离线演示：角色 / 装备面板（沙盘）                                    */
+/* ------------------------------------------------------------------ */
+/*
+ * 版式参考图：深蓝卡片 + 青色描边下拉框，标签在框上方。
+ * 这一层不属于原版 UI（原版是 640×480 的 ozj 贴图），所以单独一套配色，
+ * 用真实 DOM 的好处是可访问、可用键盘、探针也好断言。
+ */
+#sandbox {
+  position: absolute;
+  top: 12px;
+  /* 右上角现在是 0.8 缩放的小地图，沙盘默认落在左上；拖过之后位置记在 localStorage */
+  left: 12px;
+  right: auto;
+  z-index: 25;
+  width: 252px;
+  /* 底下要给原版底栏留位置，别把 HP/MP 球挡住 */
+  max-height: calc(100% - 108px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 2px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  pointer-events: auto;
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  scrollbar-width: thin;
+  scrollbar-color: #2b3d52 transparent;
+}
+
+/* 卡片标题是拖动抓手 */
+#sandbox .sb-head {
+  cursor: grab;
+  user-select: none;
+}
+
+#sandbox.dragging .sb-head {
+  cursor: grabbing;
+}
+
+#sandbox.dragging {
+  /* 拖动时不要跟过渡动画打架 */
+  transition: none;
+  opacity: 1;
+}
+
+#sandbox.hidden {
+  opacity: 0;
+  transform: translateX(14px);
+  pointer-events: none;
+}
+
+#sandbox::-webkit-scrollbar {
+  width: 6px;
+}
+
+#sandbox::-webkit-scrollbar-thumb {
+  background: #2b3d52;
+  border-radius: 3px;
+}
+
+.sb-card {
+  position: relative;
+  /* 面板是 flex 列：不加这条，卡片会被压扁成一条（内容被 overflow:hidden 裁掉），
+     而且一点滚动条都不出。加了之后卡片保持内容高度，面板自己滚。 */
+  flex: 0 0 auto;
+  border: 1px solid #23303f;
+  border-radius: 10px;
+  background:
+    linear-gradient(152deg, rgba(58, 84, 116, 0.55) 0%, rgba(24, 35, 49, 0) 42%),
+    linear-gradient(180deg, #172232 0%, #131c28 100%);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  overflow: hidden;
+}
+
+.sb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 12px 7px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+
+.sb-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #cfdbe9;
+}
+
+/* 折叠箭头：默认朝下（展开），点了转 180° */
+.sb-chev {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #5d7189;
+  transition: transform 0.2s ease;
+}
+
+.sb-chev.sb-chev-up {
+  transform: rotate(180deg);
+}
+
+.sb-body {
+  padding: 2px 12px 7px;
+}
+
+.sb-body.sb-collapsed {
+  display: none;
+}
+
+.sb-field {
+  display: block;
+  /* 原来 8px：加第三张卡片后要腾点地方，不然 Cast 按钮会被底栏挤到滚动区外 */
+  margin-top: 5px;
+}
+
+.sb-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: #8496aa;
+}
+
+.sb-select {
+  position: relative;
+}
+
+.sb-select::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 10px;
+  height: 7px;
+  transform: translateY(-50%);
+  background: no-repeat center / contain
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.6 6 6.4 11 1.6' fill='none' stroke='%238ca0b6' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  pointer-events: none;
+}
+
+#sandbox select {
+  width: 100%;
+  height: 29px;
+  padding: 0 28px 0 10px;
+  border: 1px solid #26374b;
+  border-radius: 7px;
+  background: #0d151f;
+  color: #e6eff9;
+  font: 12.5px/1.2 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  appearance: none;
+  -webkit-appearance: none;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+#sandbox select:hover:not(:disabled) {
+  border-color: #33506b;
+}
+
+#sandbox select:focus-visible,
+#sandbox select:focus {
+  border-color: #45c6da;
+  box-shadow: 0 0 0 2px rgba(69, 198, 218, 0.18);
+}
+
+#sandbox select:disabled {
+  color: #566579;
+  cursor: default;
+  opacity: 0.7;
+}
+
+/* 选项列表在 Chromium 里能单独上色，白底黑字太刺眼 */
+#sandbox select option {
+  background: #101a26;
+  color: #dfe9f4;
+}
+
+/* 技能卡片的 Cast 按钮：和下拉同宽，青色描边，按下去有一点位移 */
+.sb-cast {
+  width: 100%;
+  height: 32px;
+  margin-top: 10px;
+  border: 1px solid #2c6f7d;
+  border-radius: 7px;
+  background: linear-gradient(180deg, #1b4d5b 0%, #123440 100%);
+  color: #d8f6ff;
+  font: 700 12px/1 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.06s ease;
+}
+
+.sb-cast:hover:not(:disabled) {
+  border-color: #45c6da;
+  box-shadow: 0 0 0 2px rgba(69, 198, 218, 0.16);
+}
+
+.sb-cast:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.sb-cast:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.sb-hint {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #6f8298;
+}
+
+/* ================================================================
+   移动命令窗口（M 键）
+   ----------------------------------------------------------------
+   0.97 客户端没有这个窗口，版式按后期版本补：四列（纷争/地图/等级/金币）
+   + 移动/关闭。坐标在 UiLayer 的 640×480 逻辑坐标里，跟着舞台缩放，
+   所以这里全用逻辑像素（不要改成 px 自适应的写法）。
+   ================================================================ */
+
+.mv-panel {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  padding: 3px;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e6d8b6;
+  background:
+    linear-gradient(180deg, rgba(96, 74, 36, 0.22) 0%, rgba(0, 0, 0, 0) 38%),
+    linear-gradient(180deg, #2b2418 0%, #16120b 100%);
+  border: 1px solid #8d7a45;
+  box-shadow:
+    0 0 0 1px #0a0805,
+    inset 0 0 18px rgba(0, 0, 0, 0.65),
+    0 6px 16px rgba(0, 0, 0, 0.55);
+  user-select: none;
+}
+
+.mv-panel.hidden {
+  display: none;
+}
+
+.mv-title {
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 3px;
+  color: #ffe9a8;
+  background: linear-gradient(180deg, #4b3a1c 0%, #2c2313 100%);
+  border-bottom: 1px solid #6b5827;
+  text-shadow: 1px 1px 0 #000;
+}
+
+/* 四列：纷争 40 / 地图名 88 / 等级 44 / 金币 56 = 228（面板内宽） */
+.mv-head,
+.mv-row {
+  display: grid;
+  grid-template-columns: 40px 88px 44px 56px;
+  align-items: center;
+  column-gap: 0;
+}
+
+.mv-head {
+  height: 14px;
+  padding: 2px 0;
+  font-size: 11px;
+  color: #ffc23c;
+  border-bottom: 1px solid #4a3d20;
+}
+
+.mv-head span:nth-child(n + 3) {
+  text-align: right;
+  padding-right: 4px;
+}
+
+.mv-list {
+  /* position: relative 让 .mv-row 的 offsetTop 相对自己算（键盘选中时滚动用） */
+  position: relative;
+  /*
+   * 服务端 Move.txt 目前 23 条（足球场 + 4 张图的各层），一屏放不下 ——
+   * 12 行可视 + 细滚动条。行高 16px，所以 12*16 = 192。
+   */
+  max-height: 192px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #a3874a rgba(0, 0, 0, 0.35);
+}
+
+.mv-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.mv-list::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.mv-list::-webkit-scrollbar-thumb {
+  background: #a3874a;
+  border-radius: 2px;
+}
+
+.mv-list::-webkit-scrollbar-thumb:hover {
+  background: #c9a95c;
+}
+
+.mv-row {
+  height: 16px;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+  color: #d9cba6;
+}
+
+.mv-row:nth-child(odd) {
+  background: rgba(255, 255, 255, 0.022);
+}
+
+.mv-row:hover {
+  background: rgba(255, 240, 190, 0.09);
+}
+
+.mv-row.sel {
+  background: rgba(196, 158, 74, 0.22);
+  outline: 1px solid #a3874a;
+  outline-offset: -1px;
+  color: #fff2c8;
+}
+
+/* 等级/金币不足：整行变红（照后期版本的显示规则） */
+.mv-row.locked,
+.mv-row.locked .mv-conflict {
+  color: #d0453a;
+  text-shadow: 0 0 4px rgba(160, 20, 10, 0.35);
+}
+
+.mv-row.locked.sel {
+  color: #ff6a5c;
+  background: rgba(120, 26, 18, 0.28);
+  outline-color: #8f3a2c;
+}
+
+.mv-conflict {
+  color: #ff7a5e;
+  font-size: 10px;
+}
+
+.mv-cell {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.mv-num {
+  text-align: right;
+  padding-right: 4px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 原因提示：只有选到走不通的条目时才占一行 */
+.mv-hint {
+  height: 0;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 12px;
+  color: #ff8a6a;
+  text-align: center;
+  text-shadow: 1px 1px 0 #000;
+  transition: height 0.12s ease;
+}
+
+.mv-hint.show {
+  height: 14px;
+  padding-top: 2px;
+}
+
+.mv-btns {
+  display: flex;
+  justify-content: center;
+  gap: 18px;
+  padding: 6px 0 3px;
+  border-top: 1px solid #3d3219;
+  margin-top: 2px;
+}
+
+.mv-btn {
+  min-width: 62px;
+  height: 20px;
+  padding: 0 10px;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 1px;
+  color: #f0e0b4;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+  cursor: pointer;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.mv-btn:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.mv-btn:active {
+  transform: translateY(1px);
+}
+
+/* 走不通时按「移动」：抖一下，比只弹提示更容易注意到 */
+@keyframes mv-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-2px); }
+  75% { transform: translateX(2px); }
+}
+
+.mv-row.shake {
+  animation: mv-shake 0.22s ease;
+}
+
+/* ================================================================
+   商店 / 仓库面板（src/ui/npcPanel.ts）
+   ================================================================
+   版式逐像素照抄 Win 端：面板原点固定 (260,0)，底板
+   Item_Back01 190×256 + Item_Back02 190×177 = 190×433；
+   网格 (275,50) 8×15 格 20px；底部 zen 条 / 税费 / 3 个 24×24 按钮。
+   这里的 px 全是 640×480 逻辑像素，缩放交给 UiLayer。
+   ================================================================ */
+
+.npc-panel {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 11;
+  user-select: none;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+}
+
+.npc-panel.hidden {
+  display: none;
+}
+
+/*
+ * 仓库附属区（金币条 / 税费 / 三个按钮）和商店附属区。
+ *
+ * **必须显式定位 + z-index**：`build()` 里两块底板 `Item_Back01/02` 是
+ * 构造函数之后才 append 到 `.npc-panel` 的，DOM 顺序排在 `.npc-wh` 后面；
+ * 底板的 `z-index` 和这里的子元素一样是 0，同层级就按 DOM 顺序画 ——
+ * 结果**金币条被 `Item_Back02` 盖住了**（数字浮在一块空底板上，
+ * 看起来就是「金币位置不对」）。抬到 1 就盖在底板上面，又低于格子(2)。
+ */
+.npc-wh,
+.npc-shop {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+/*
+ * 仓库附属区（金币条 / 税费 / 三个按钮）和商店附属区。
+ *
+ * **必须显式定位 + z-index**：`build()` 里两块底板 `Item_Back01/02` 是
+ * 构造函数之后才 append 到 `.npc-panel` 的，DOM 顺序排在 `.npc-wh` 后面；
+ * 底板的 `z-index` 和这里的子元素一样是 0，同层级就按 DOM 顺序画 ——
+ * 结果**金币条被 `Item_Back02` 盖住了**（数字浮在一块空底板上，
+ * 看起来就是「金币位置不对」）。抬到 1 就盖在底板上面，又低于格子(2)。
+ */
+.npc-wh,
+.npc-shop {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.npc-wh.hidden,
+.npc-shop.hidden {
+  display: none;
+}
+
+/* 底板 / 金币条：绝对定位的贴图，原始像素尺寸就是显示尺寸 */
+.npc-sprite {
+  position: absolute;
+  pointer-events: none;
+  image-rendering: pixelated;
+  z-index: 0;
+}
+
+/* 标题：原版 RenderText(dword+35, dword+12, …, 120*W/640, bold) */
+.npc-title {
+  position: absolute;
+  z-index: 3;
+  height: 14px;
+  line-height: 14px;
+  padding: 0 2px;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 0;
+  color: #dcdcdc;
+  white-space: nowrap;
+  text-shadow: 1px 1px 0 #000;
+}
+
+/* 上锁时原版 glColor3f(1,1,0) 把字染黄 */
+.npc-title.locked {
+  color: #ffff00;
+}
+
+.npc-grid {
+  position: absolute;
+  z-index: 2;
+}
+
+.npc-cell {
+  position: absolute;
+  cursor: pointer;
+}
+
+.npc-cell-bg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0.95;
+}
+
+.npc-cell.taken .npc-cell-bg {
+  opacity: 1;
+}
+
+.npc-cell:hover {
+  outline: 1px solid rgba(255, 214, 150, 0.55);
+  outline-offset: -1px;
+}
+
+.npc-item-icon {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2;
+  filter: drop-shadow(1px 1px 1px rgba(0, 0, 0, 0.65));
+}
+
+.npc-item-icon.missing {
+  background: radial-gradient(circle, #d8b56a 0%, #6b5326 70%);
+  border-radius: 2px;
+}
+
+.npc-count {
+  position: absolute;
+  z-index: 3;
+  pointer-events: none;
+  font-size: 9px;
+  line-height: 9px;
+  color: #ffe6b4;
+  text-shadow: 0 0 2px #000, 1px 1px 0 #000;
+}
+
+/* ─── 仓库：zen / 税费 / 按钮 ─────────────────────────────────── */
+
+.npc-text {
+  position: absolute;
+  z-index: 3;
+  height: 13px;
+  line-height: 13px;
+  font-size: 11px;
+  font-weight: bold;
+  white-space: nowrap;
+  text-shadow: 1px 1px 0 #000;
+}
+
+/* 原版 0xFF96DCFF（ABGR）= #FFDC96 */
+.npc-zen-label,
+.npc-zen-value {
+  color: #ffdc96;
+}
+
+/* 金额分级：>=100K 绿、>=1M 橙、>=10M 红 */
+.npc-zen-value.lv2 {
+  color: #00c918;
+}
+
+.npc-zen-value.lv3 {
+  color: #ff9600;
+}
+
+.npc-zen-value.lv4 {
+  color: #ff0000;
+}
+
+/* 税费标签固定红 0xFF0000FF → #FF0000，金额与 zen 同色 */
+.npc-tax-label {
+  color: #ff0000;
+}
+
+.npc-tax-value {
+  color: #ffdc96;
+}
+
+.npc-btn {
+  position: absolute;
+  z-index: 4;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.npc-btn img {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.npc-btn:hover {
+  filter: brightness(1.18);
+}
+
+.npc-btn:active {
+  transform: translateY(1px);
+}
+
+/* 商店的「修理全部」：原版那排按钮是位图，这里用同色系文字按钮占一格 */
+.npc-btn-wide {
+  width: 76px;
+  height: 18px;
+  line-height: 16px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #f0e0b4;
+  text-shadow: 1px 1px 0 #000;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+}
+
+.npc-btn-wide:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.npc-close {
+  position: absolute;
+  z-index: 5;
+  cursor: pointer;
+  image-rendering: pixelated;
+}
+
+/* 反馈条：贴在面板下方（433 → 436），不遮原版元素 */
+.npc-toast {
+  position: absolute;
+  left: 0;
+  top: 436px;
+  width: 190px;
+  min-height: 14px;
+  line-height: 14px;
+  padding: 2px 4px;
+  box-sizing: border-box;
+  font-size: 11px;
+  text-align: center;
+  color: #e8dcc0;
+  background: rgba(0, 0, 0, 0.78);
+  border: 1px solid #6b5827;
+  z-index: 6;
+}
+
+.npc-toast.hidden {
+  display: none;
+}
+
+.npc-toast.ok {
+  color: #a8e05f;
+}
+
+.npc-toast.error {
+  color: #ff7a6b;
+}
+
+/* ─── 混沌机器（src/ui/chaosPanel.ts）─────────────────────────────
+   参照 RenderChaosMix：
+     配方 0xFF30F0FF（ABGR）→ #FFF030
+     成功率 / 费用 0xFFFFFFD2 → #D2FFFF
+     提示 0xFF1414FF → #FF1414
+   ================================================================ */
+
+.chaos-recipe {
+  color: #fff030;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 材料不匹配：原版也是同一句 "Improper items"，但用暗一点的黄区分 */
+.chaos-recipe.bad {
+  color: #b8a03a;
+}
+
+.chaos-rate,
+.chaos-money {
+  color: #d2ffff;
+}
+
+.chaos-hint {
+  color: #ff1414;
+  font-size: 10px;
+  height: 12px;
+  line-height: 12px;
+}
+
+/* 鼠标操作说明（原版靠拖拽，本 port 简化成点击） */
+.chaos-mouse-hint {
+  position: absolute;
+  left: 8px;
+  top: 338px;
+  width: 174px;
+  font-size: 10px;
+  line-height: 12px;
+  text-align: center;
+  color: #b9b39e;
+  text-shadow: 1px 1px 0 #000;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.chaos-mix-btn {
+  position: absolute;
+  z-index: 4;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.chaos-mix-btn img {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.chaos-mix-btn:hover {
+  filter: brightness(1.15);
+}
+
+.chaos-mix-btn:active {
+  transform: translateY(1px);
+}
+
+.chaos-mix-btn.busy {
+  cursor: progress;
+  filter: grayscale(0.6) brightness(0.8);
+}
+
+/* 刚合成出来的产物（原版有 0.5s 的闪烁动画，这里做个高亮呼吸） */
+.npc-item-icon.chaos-fresh {
+  animation: chaos-fresh 0.9s ease-in-out 2;
+}
+
+@keyframes chaos-fresh {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 0 rgba(255, 240, 120, 0));
+  }
+  50% {
+    filter: drop-shadow(0 0 4px rgba(255, 240, 120, 0.95));
+  }
+}
+
+/* ================================================================
+   事件倒计时（src/ui/eventTimer.ts）
+   ================================================================
+   0.97 的 Win 端没有这块 UI（源码只解包不显示），位置是本 port 定的：
+   左上角 (8,6)，避开右侧背包（450..640）与底部聊天框。
+   ================================================================ */
+
+.evt-panel {
+  position: absolute;
+  z-index: 9;
+  pointer-events: none;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+}
+
+.evt-panel.hidden {
+  display: none;
+}
+
+.evt-line {
+  position: absolute;
+  left: 0;
+  height: 13px;
+  line-height: 13px;
+  font-size: 11px;
+  white-space: nowrap;
+  text-shadow: 1px 1px 0 #000, 0 0 3px #000;
+}
+
+.evt-name {
+  color: #ffdc96;
+  margin-right: 6px;
+}
+
+.evt-val {
+  color: #c8dce6;
+}
+
+/* 可入场 = 绿，进行中 = 橙（与服务端 status 2/3 对应） */
+.evt-val.open {
+  color: #a8e05f;
+}
+
+.evt-val.live {
+  color: #ff9600;
+}
+
+/* ================================================================
+   通用输入框（src/ui/dialog.ts）
+   ================================================================
+   拆堆叠（0x2B）和仓库密码（0x83）共用。640×480 逻辑坐标，
+   面板居中，宽度固定 240，高度按字段数算（dialog.ts 里设）。
+   ================================================================ */
+
+.dlg-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  pointer-events: auto;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.dlg-overlay.hidden {
+  display: none;
+}
+
+.dlg-box {
+  position: absolute;
+  left: 200px;
+  top: 148px;
+  width: 240px;
+  box-sizing: border-box;
+  padding: 6px 8px 8px;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e6d8b6;
+  background:
+    linear-gradient(180deg, rgba(96, 74, 36, 0.25) 0%, rgba(0, 0, 0, 0) 40%),
+    linear-gradient(180deg, #2b2418 0%, #14100a 100%);
+  border: 1px solid #8d7a45;
+  box-shadow:
+    0 0 0 1px #0a0805,
+    inset 0 0 14px rgba(0, 0, 0, 0.6),
+    0 8px 20px rgba(0, 0, 0, 0.6);
+}
+
+.dlg-title {
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 1px;
+  color: #ffe9a8;
+  text-shadow: 1px 1px 0 #000;
+  border-bottom: 1px solid #6b5827;
+  margin-bottom: 6px;
+}
+
+.dlg-hint {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 24px;
+  font-size: 10px;
+  line-height: 12px;
+  color: #9c8a5e;
+  text-align: center;
+}
+
+.dlg-hint.hidden {
+  display: none;
+}
+
+.dlg-row {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  height: 24px;
+}
+
+.dlg-label {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  width: 78px;
+  font-size: 11px;
+  color: #cbb98a;
+  text-align: right;
+  padding-right: 6px;
+  box-sizing: border-box;
+}
+
+.dlg-input {
+  position: absolute;
+  left: 84px;
+  right: 0;
+  top: 2px;
+  height: 18px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 2px;
+  color: #fff3cc;
+  background: #0d0a06;
+  border: 1px solid #6b5827;
+  outline: none;
+}
+
+.dlg-input:focus {
+  border-color: #d6b96a;
+  box-shadow: 0 0 4px rgba(214, 185, 106, 0.45);
+}
+
+.dlg-btn {
+  position: absolute;
+  width: 62px;
+  height: 22px;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #f0e0b4;
+  text-shadow: 1px 1px 0 #000;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  cursor: pointer;
+}
+
+.dlg-btn:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.dlg-btn:active {
+  transform: translateY(1px);
+}
+
+.dlg-alt.hidden {
+  display: none;
+}
+
+/* ================================================================
+   任务窗口（src/ui/questPanel.ts）
+   ================================================================
+   左侧列表 108px + 右侧详情。数据来自 Data/Quest/*.txt（服务端配置的副本），
+   状态来自 0xA0 的 bitmask。位置 (196,20)：避开右侧背包（450..640）
+   和底部聊天框（y≥404）。
+   ================================================================ */
+
+.quest-panel {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  z-index: 12;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e6d8b6;
+  background:
+    linear-gradient(180deg, rgba(96, 74, 36, 0.22) 0%, rgba(0, 0, 0, 0) 30%),
+    linear-gradient(180deg, #2b2418 0%, #14100a 100%);
+  border: 1px solid #8d7a45;
+  box-shadow:
+    0 0 0 1px #0a0805,
+    inset 0 0 16px rgba(0, 0, 0, 0.6),
+    0 8px 20px rgba(0, 0, 0, 0.55);
+}
+
+.quest-panel.hidden {
+  display: none;
+}
+
+.quest-title {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  color: #ffe9a8;
+  background: linear-gradient(180deg, #4b3a1c 0%, #2c2313 100%);
+  border-bottom: 1px solid #6b5827;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.quest-close {
+  position: absolute;
+  right: 2px;
+  top: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  line-height: 16px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #ffd98a;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  z-index: 2;
+}
+
+.quest-close:hover {
+  color: #fff;
+}
+
+.quest-list {
+  position: absolute;
+  left: 4px;
+  top: 22px;
+  bottom: 6px;
+  overflow: hidden;
+  border-right: 1px solid #3a3222;
+}
+
+.quest-row {
+  position: absolute;
+  left: 0;
+  right: 4px;
+  height: 15px;
+  line-height: 15px;
+  padding: 0 2px;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  color: #bfae84;
+}
+
+.quest-row:hover {
+  background: rgba(214, 185, 106, 0.12);
+}
+
+.quest-row.active {
+  background: rgba(214, 185, 106, 0.22);
+  color: #ffe9a8;
+}
+
+.quest-row-name {
+  margin-right: 4px;
+}
+
+.quest-row-tag {
+  color: #8d7a45;
+  font-size: 9px;
+}
+
+.quest-row.state-1 .quest-row-tag {
+  color: #a8e05f;
+}
+
+.quest-row.state-2 .quest-row-tag {
+  color: #6fa8dc;
+}
+
+.quest-detail-title {
+  position: absolute;
+  left: 118px;
+  right: 6px;
+  top: 24px;
+  height: 16px;
+  line-height: 16px;
+  font-size: 11px;
+  font-weight: bold;
+  color: #ffe9a8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.quest-detail-title.state-1 {
+  color: #a8e05f;
+}
+
+.quest-detail-title.state-2 {
+  color: #6fa8dc;
+}
+
+.quest-detail-body {
+  position: absolute;
+  left: 118px;
+  right: 6px;
+  top: 44px;
+  bottom: 34px;
+  font-size: 10px;
+  line-height: 14px;
+  color: #cbb98a;
+  white-space: pre-wrap;
+  overflow: hidden;
+}
+
+.quest-action {
+  position: absolute;
+  left: 118px;
+  bottom: 8px;
+  width: 62px;
+  height: 20px;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #f0e0b4;
+  text-shadow: 1px 1px 0 #000;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  cursor: pointer;
+}
+
+.quest-action:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.quest-action.hidden {
+  display: none;
+}
+
+.quest-empty {
+  position: absolute;
+  left: 118px;
+  top: 60px;
+  right: 6px;
+  font-size: 10px;
+  color: #8d7a45;
+}
+
+.quest-empty.hidden {
+  display: none;
+}
+
+/* ================================================================
+   队伍窗口（src/ui/partyPanel.ts）
+   ================================================================
+   逐像素照 Win 端 `RenderParty(450, 0)`：
+
+     面板 (450,0) 190×433 = Item_Back01 190×256 + Item_Back02 190×177
+     成员行 pitch 35：名字 y+52 / 地图+坐标 y+60 / 血条 y+69 / (cur/max) y+77
+     关闭按钮 (25,395) 24×24
+
+   另有「紧凑血条」：面板没开时贴在屏幕右缘（50×19 一行，y 从 5 起）。
+
+   字高说明：原版 g_hFont 在 640×480 下字高 ~9px，四行文字塞进 35px 行高。
+   这里用 9px/9px 才塞得下；换成 12px 会重叠。
+   ================================================================ */
+
+.party-panel {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 13;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #d2e6ff;
+  overflow: hidden;
+  user-select: none;
+}
+
+.party-plate {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* 标题：`RenderText(a1+35, a2+12, GlobalText[190], 120*W/640)` */
+.party-title {
+  position: absolute;
+  z-index: 3;
+  font-size: 11px;
+  line-height: 13px;
+  letter-spacing: 0;
+  color: #dcdcdc;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+}
+
+.party-title.party-title-active {
+  color: #fff;
+}
+
+/* 行容器铺满面板当坐标参照，里面的元素用「相对面板原点」的绝对值 */
+.party-rows {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+.party-name {
+  position: absolute;
+  font-size: 9px;
+  line-height: 9px;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: #ffe6d2;
+  white-space: nowrap;
+  overflow: hidden;
+  max-width: 116px;
+}
+
+.party-sub {
+  position: absolute;
+  font-size: 9px;
+  line-height: 9px;
+  letter-spacing: 0;
+  color: #d2e6ff;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 第 0 行（队长）的文字底 —— 原版 `m_dwBackColor = 0xFF962828` */
+.party-row-hl {
+  background: #962828;
+}
+
+.party-hp-bg {
+  position: absolute;
+  background: #330000;
+}
+
+.party-hp-fill {
+  position: absolute;
+  background: #e10f00;
+}
+
+.party-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+}
+
+.party-empty.hidden {
+  display: none;
+}
+
+.party-empty-line {
+  position: absolute;
+  font-size: 9px;
+  line-height: 11px;
+  letter-spacing: 0;
+  color: #e6e6e6;
+  white-space: nowrap;
+}
+
+/* 24×24 的图标按钮（关闭 / 踢人）：exit_01 常态、exit_02 悬停 */
+.party-icon-btn {
+  position: absolute;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 4;
+}
+
+.party-icon-btn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0.92;
+}
+
+.party-icon-btn:hover img {
+  opacity: 1;
+  filter: brightness(1.35) drop-shadow(0 0 3px rgba(255, 214, 130, 0.8));
+}
+
+/* ── 邀请条（0x40 收到时弹，贴在面板下半部） ── */
+.party-invite {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 4px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid #8d7a45;
+}
+
+.party-invite.hidden {
+  display: none;
+}
+
+.party-invite-text {
+  flex: 1;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: 0;
+  color: #ffe6b4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.party-btn {
+  flex: none;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: 10px;
+  color: #f0e0b4;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.party-btn:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.party-accept {
+  color: #c8f0c0;
+}
+
+.party-decline {
+  color: #d9a79a;
+}
+
+/* ── 紧凑血条（!PartyOpened）：屏幕右缘 50×19 一行 ── */
+.party-compact {
+  position: absolute;
+  pointer-events: none;
+  z-index: 11;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+}
+
+.party-compact.hidden {
+  display: none;
+}
+
+.party-compact-bg {
+  position: absolute;
+  /* 原版 glColor4f(0.1, 0.1, 0.1, 0.7) */
+  background: rgba(26, 26, 26, 0.7);
+  pointer-events: auto;
+}
+
+.party-compact-bg:hover {
+  /* glColor4f(0.5, 0.5, 0.5, 0.8) */
+  background: rgba(128, 128, 128, 0.8);
+}
+
+/* 不在视野：glColor4f(0.3, 0, 0, 0.5) —— 名字还在，格子变暗红 */
+.party-compact-bg.out {
+  background: rgba(77, 0, 0, 0.5);
+}
+
+.party-compact-hpbg {
+  position: absolute;
+  /* glColor3f(0.196, 0.039, 0) */
+  background: #320a00;
+}
+
+.party-compact-seg {
+  position: absolute;
+  /* glColor3f(0.98, 0.039, 0) */
+  background: #fa0a00;
+}
+
+.party-compact-name {
+  position: absolute;
+  font-size: 9px;
+  line-height: 9px;
+  letter-spacing: 0;
+  color: #fff;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  pointer-events: none;
+}
+
+.party-compact-cap {
+  position: absolute;
+  display: block;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.party-compact-line {
+  position: absolute;
+  /* glColor4f(0.722, 0.592, 0.380, 0.5) */
+  background: rgba(184, 151, 97, 0.5);
+  pointer-events: none;
+}
+
+/* ================================================================
+   交易窗口（src/ui/tradePanel.ts）
+   ================================================================
+   上下两个 8×4 网格（我的 / 对方的），中间金币行，底部确定/取消。
+   位置 (214,74)，避开右侧背包（450..640）与底部聊天框。
+   ================================================================ */
+
+.trade-panel {
+  position: absolute;
+  box-sizing: border-box;
+  pointer-events: auto;
+  z-index: 14;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e6d8b6;
+  background:
+    linear-gradient(180deg, rgba(96, 74, 36, 0.22) 0%, rgba(0, 0, 0, 0) 26%),
+    linear-gradient(180deg, #2b2418 0%, #14100a 100%);
+  border: 1px solid #8d7a45;
+  box-shadow:
+    0 0 0 1px #0a0805,
+    inset 0 0 16px rgba(0, 0, 0, 0.6),
+    0 8px 20px rgba(0, 0, 0, 0.55);
+}
+
+.trade-panel.hidden {
+  display: none;
+}
+
+.trade-title {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: 0;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  color: #ffe9a8;
+  background: linear-gradient(180deg, #4b3a1c 0%, #2c2313 100%);
+  border-bottom: 1px solid #6b5827;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.trade-partner {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 22px;
+  height: 16px;
+  line-height: 16px;
+  font-size: 11px;
+  color: #cbb98a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trade-label {
+  position: absolute;
+  left: 8px;
+  font-size: 10px;
+  color: #9c8a5e;
+}
+
+.trade-grid {
+  position: absolute;
+  left: 8px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid #3a3222;
+}
+
+.trade-cell {
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  box-sizing: border-box;
+  border: 1px solid #241d12;
+}
+
+.trade-icon {
+  position: absolute;
+  image-rendering: pixelated;
+  pointer-events: none;
+  filter: drop-shadow(1px 1px 1px rgba(0, 0, 0, 0.6));
+}
+
+.trade-money-label {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 252px;
+  height: 14px;
+  line-height: 14px;
+  font-size: 10px;
+  color: #ffdc96;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.trade-money-input {
+  position: absolute;
+  left: 8px;
+  top: 268px;
+  width: 108px;
+  height: 18px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  font-family: inherit;
+  font-size: 11px;
+  color: #fff3cc;
+  background: #0d0a06;
+  border: 1px solid #6b5827;
+  outline: none;
+}
+
+.trade-money-input:focus {
+  border-color: #d6b96a;
+}
+
+.trade-btn {
+  height: 20px;
+  padding: 0 6px;
+  font-family: inherit;
+  font-size: 11px;
+  color: #f0e0b4;
+  text-shadow: 1px 1px 0 #000;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  cursor: pointer;
+}
+
+.trade-btn:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.trade-money-set {
+  position: absolute;
+  left: 122px;
+  top: 268px;
+  width: 46px;
+}
+
+.trade-ok {
+  position: absolute;
+  left: 8px;
+  top: 292px;
+  width: 62px;
+}
+
+.trade-cancel {
+  position: absolute;
+  left: 80px;
+  top: 292px;
+  width: 62px;
+}
+
+.trade-state {
+  position: absolute;
+  left: 148px;
+  top: 295px;
+  width: 48px;
+  font-size: 10px;
+  line-height: 12px;
+  color: #a8e05f;
+  text-align: right;
+}
+
+.trade-request {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 6px;
+  height: 34px;
+  box-sizing: border-box;
+  padding: 3px 4px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid #6b5827;
+}
+
+.trade-request.hidden {
+  display: none;
+}
+
+.trade-request-text {
+  font-size: 11px;
+  color: #ffe9a8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trade-accept,
+.trade-decline {
+  height: 14px;
+  margin-top: 2px;
+  margin-right: 4px;
+  font-size: 10px;
+}
+
+.trade-decline {
+  color: #d9a79a;
+}
+
+/* ─── 战盟（src/ui/guildPanel.ts）─────────────────────────────────
+   面板在 450,0（`RenderGuildList(450, 0)`），和背包同位置 → 互斥打开。
+   ================================================================ */
+
+.guild-notice {
+  position: absolute;
+  z-index: 3;
+  transform: translateX(-50%);
+  font-size: 11px;
+  line-height: 13px;
+  color: #64ffc8; /* 0xFFC8FF64 */
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.guild-noguild {
+  color: #b9b39e;
+  font-size: 10px;
+}
+
+.guild-list {
+  position: absolute;
+  z-index: 3;
+  overflow: hidden;
+}
+
+.guild-row {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  font-size: 11px;
+  line-height: 16px;
+  color: #e6e6e6;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  cursor: default;
+}
+
+.guild-row:hover {
+  background: rgba(255, 214, 150, 0.12);
+}
+
+.guild-row.self .guild-name {
+  color: #ffe08a;
+}
+
+.guild-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #6b6b6b;
+  flex: none;
+}
+
+.guild-dot.on {
+  background: #6cff6c;
+  box-shadow: 0 0 4px #6cff6c;
+}
+
+.guild-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guild-state {
+  flex: none;
+  font-size: 9px;
+  color: #9a9a8a;
+}
+
+.guild-more {
+  position: absolute;
+  left: 4px;
+  font-size: 9px;
+  color: #8f8f80;
+}
+
+.guild-btns {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.guild-btn {
+  position: absolute !important;
+  pointer-events: auto;
+  width: 56px;
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+/* 入盟申请条（贴在按钮下沿） */
+.guild-req {
+  position: absolute;
+  left: 4px;
+  top: 414px;
+  width: 182px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 4px;
+  box-sizing: border-box;
+  background: rgba(0, 0, 0, 0.82);
+  border: 1px solid #8d7a45;
+}
+
+.guild-req.hidden {
+  display: none;
+}
+
+.guild-req-text {
+  flex: 1;
+  font-size: 10px;
+  color: #ffe6b4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guild-req-btn {
+  flex: none;
+  padding: 1px 6px;
+  font-family: inherit;
+  font-size: 10px;
+  color: #f0e0b4;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.guild-req-btn:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+/* ── 创建战盟框（RenderGuildCreation） ── */
+.guild-create {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 6;
+}
+
+.guild-create.hidden {
+  display: none;
+}
+
+.guild-create-bg {
+  position: absolute;
+  inset: 0;
+  background: rgba(8, 8, 8, 0.86);
+  pointer-events: auto;
+}
+
+.guild-create-btn {
+  width: 62px;
+}
+
+.guild-name-label {
+  color: #ffdc96;
+}
+
+.guild-name-input {
+  position: absolute;
+  width: 100px;
+  height: 14px;
+  padding: 0 2px;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 11px;
+  color: #fff4cf;
+  background: rgba(0, 0, 0, 0.35);
+  border: none;
+  outline: none;
+}
+
+.guild-create-hint {
+  color: #b9b39e;
+  font-size: 10px;
+}
+
+.guild-mark-grid {
+  position: absolute;
+  background: #1b1b1b;
+  box-shadow: 0 0 0 1px #6b5827;
+}
+
+.guild-mark-cell {
+  position: absolute;
+  box-sizing: border-box;
+  /* 空格的网格线要看得见，否则整块画板是一团黑 */
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  cursor: crosshair;
+}
+
+.guild-mark-swatch {
+  position: absolute;
+  box-shadow: 0 0 0 1px #d6b96a;
+}
+
+.guild-mark-palette {
+  position: absolute;
+}
+
+.guild-mark-color {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+}
+
+.guild-mark-color.picked {
+  outline: 1px solid #fff;
+  outline-offset: 1px;
+}
+
+/* 底栏文字按钮（战盟）：原版 (582,459) 52×18，没有图标 */
+.bar-text-btn {
+  position: absolute;
+  z-index: 3;
+  padding: 0;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 1px;
+  color: #f0e0b4;
+  text-shadow: 1px 1px 0 #000;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.bar-text-btn:hover {
+  color: #fff4cf;
+  border-color: #d6b96a;
+}
+
+.bar-text-btn.active {
+  color: #fff;
+  border-color: #ffd479;
+  box-shadow: 0 0 4px rgba(255, 212, 121, 0.7);
+}
+
+/* 战盟标题要和右上角关闭按钮抢位置（"盟名 (Score:N)" 很容易超宽）：
+   字号降到 11px（原版就是 120*W/640 的等比小字），再加截断兜底 */
+.guild-panel .npc-title {
+  font-size: 11px;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── 事件入场窗口（src/ui/eventPanel.ts）──────────────────────────
+   照 RenderEventWindow：面板 (260,0)，档位行 x=25 宽 140，
+   底图是贴图 240 = Interface/Message_box。
+   ================================================================ */
+
+.event-panel {
+  /* 和背包/仓库/混沌机同一块底板，位置也一样 */
+}
+
+/*
+ * 档位行和说明文字必须压在底板图片上面。
+ *
+ * 底板是在 `build()`（异步，等 OZJ 解码）里 append 的，**晚于** panel 里
+ * 早就建好的 rows / body —— 不显式给 z-index 的话，底板会盖住它们。
+ * 两个容器都铺满面板（inset:0）当坐标参照，里面的 absolute 子元素
+ * 就能继续用「相对面板原点」的像素值。
+ */
+.event-rows,
+.event-body {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+.event-row {
+  position: absolute;
+  padding: 0;
+  overflow: hidden;
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.event-row-bg {
+  /* Message_box 是横向小条，拉伸到 140×33/35（原版 UV 只取到 0.832） */
+  position: absolute !important;
+  left: 0;
+  top: 0;
+  width: 100% !important;
+  height: 100% !important;
+  object-fit: fill;
+  opacity: 0.92;
+}
+
+.event-row-text {
+  position: absolute;
+  top: 11px;
+  /*
+   * 原版 `RenderText(x+12, y+12, label, 116 * W/640, …)` 的第四个参数是
+   * **裁剪宽度**，不是省略号 —— 所以这里用 clip，超出的字直接切掉。
+   * 字体用宋体：原版就是 12px 宋体点阵，换成雅黑会明显变宽、截断更早。
+   */
+  font-family: 'SimSun', '宋体', serif;
+  font-size: 9px;
+  line-height: 11px;
+  /*
+   * 必须显式归零：`.npc-panel` 那一套给文字留了 2px 字距（中文面板好看），
+   * 这里 23 个字符就是多 46px —— 直接把 `Castle 2 (level 80-129)` 挤掉尾巴。
+   * 原版 `RenderText` 是 0 字距。
+   */
+  letter-spacing: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.75);
+}
+
+/* 恶魔广场：0.9/0.8/0.7 的暖色，hover 变纯白 */
+.event-row-ds .event-row-text {
+  color: #e6ccb3;
+}
+
+.event-row-ds:hover .event-row-text {
+  color: #fff;
+}
+
+/* 血色城堡：0.7/0.7/0.9 的冷紫，hover 纯白 */
+.event-row-bc .event-row-text {
+  color: #b3b3e6;
+}
+
+.event-row-bc:hover .event-row-text {
+  color: #fff;
+}
+
+/* 等级不在本档：原版 glColor3f(0.4,0.4,0.5) + 点击直接 continue */
+.event-row-off {
+  cursor: default;
+}
+
+.event-row-off .event-row-bg {
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+
+.event-row-off .event-row-text {
+  color: #666680;
+}
+
+.event-body-line {
+  position: absolute;
+  width: 132px;
+  font-family: 'SimSun', '宋体', serif;
+  font-size: 9px;
+  line-height: 11px;
+  letter-spacing: 0;
+  color: #d8d3c4;
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
+/*
+ * 标题：原版 `RenderText(x+35, y+12, GlobalText[...], 120 * W/640, …)`，
+ * 120 是裁剪宽度。用宋体 11px 刚好能把 "Messenger of Archangel" 收进去
+ * （12px 会像原版一样被切掉尾巴）。
+ */
+.event-panel .npc-title {
+  font-family: 'SimSun', '宋体', serif;
+  font-size: 11px;
+  letter-spacing: 0;
+  max-width: 122px;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+/* 赛事状态行（0x9B）：贴在 0xE6 倒计时列表下面一条 */
+.evt-match {
+  position: absolute;
+  left: 0;
+  white-space: nowrap;
+  font-size: 11px;
+  line-height: 13px;
+  text-shadow: 1px 1px 0 #000;
+  color: #ffd479;
+}
+
+.evt-match.live {
+  color: #ffd479;
+}
+
+.evt-match.done {
+  color: #8f8f80;
+}
+
+/* ================================================================
+   黄金弓箭手窗口（src/ui/goldenArcherPanel.ts）
+   ================================================================
+   照 UI/GoldenArcher.cpp 的 GA_Custom_Render：(450,0) 190×433，
+   按钮底图是贴图 240 = Interface/Message_box（120×22，居中文字）。
+   ================================================================ */
+
+.ga-panel {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 13;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #ffe6d2;
+  overflow: hidden;
+  user-select: none;
+}
+
+.ga-plate {
+  position: absolute;
+  display: block;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.ga-title {
+  position: absolute;
+  z-index: 3;
+  font-size: 11px;
+  line-height: 13px;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: #e6e6e6;
+  background: #141414;
+  text-shadow: 1px 1px 0 #000;
+  max-width: 120px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* 副标题：`GlobalText[243..246]`，y 比标题低 10 */
+.ga-subtitle {
+  position: absolute;
+  z-index: 3;
+  font-size: 10px;
+  line-height: 12px;
+  letter-spacing: 0;
+  color: #ffd47a;
+  text-shadow: 1px 1px 0 #000;
+  max-width: 150px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ga-body {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+/* 说明文字：9px（原版 g_hFont 在这个分辨率下就是 9px 行高） */
+.ga-line {
+  position: absolute;
+  font-size: 9px;
+  line-height: 11px;
+  letter-spacing: 0;
+  color: #ffe6d2;
+  white-space: nowrap;
+  max-width: 190px;
+  overflow: hidden;
+}
+
+.ga-gold {
+  color: #dfbf67;
+  font-weight: 700;
+}
+
+/* 幸运号码（原版用 g_hFontBig + 金色） */
+.ga-lucky {
+  position: absolute;
+  font-size: 11px;
+  line-height: 13px;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: #dfbf67;
+  white-space: nowrap;
+}
+
+/* 「已收集 / 已登记」下的数字（原版 RenderNumber2D 画 8×8 点阵数字） */
+.ga-num {
+  position: absolute;
+  font-size: 11px;
+  line-height: 13px;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+}
+
+.ga-num.gold {
+  color: #cca000;
+}
+
+.ga-divider {
+  position: absolute;
+  width: 190px;
+  height: 10px;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0) 0%,
+    rgba(180, 150, 90, 0.55) 40%,
+    rgba(90, 74, 40, 0.55) 60%,
+    rgba(0, 0, 0, 0) 100%
+  );
+  pointer-events: none;
+}
+
+/* 按钮：Message_box 底图 + 居中文字；关掉的整块灰掉（glColor3f(0.4,0.4,0.4)） */
+.ga-box {
+  position: absolute;
+  padding: 0;
+  box-sizing: border-box;
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  background-color: transparent;
+  border: none;
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 20px;
+  letter-spacing: 0;
+  color: #ffe6d2;
+  text-align: center;
+  text-shadow: 1px 1px 0 #000;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ga-box:hover:not(.off) {
+  color: #fff;
+  filter: brightness(1.25) sepia(0.3);
+}
+
+.ga-box.off {
+  filter: grayscale(1) brightness(0.55);
+  color: #9a9a9a;
+  cursor: default;
+}
+
+.ga-input {
+  position: absolute;
+  padding: 0 4px;
+  box-sizing: border-box;
+  font-family: inherit;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #fff4cf;
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+  outline: none;
+}
+
+.ga-input:focus {
+  border-color: #d6b96a;
+}
+
+/* 翻页（原版 y=375，19×19 箭头） */
+.ga-page {
+  position: absolute;
+  left: 0;
+  width: 190px;
+  text-align: center;
+  font-size: 10px;
+  line-height: 12px;
+  color: #fff;
+  pointer-events: none;
+}
+
+.ga-arrow {
+  position: absolute;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 16px;
+  color: #f0e0b4;
+  background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
+  border: 1px solid #8d7a45;
+  cursor: pointer;
+}
+
+.ga-arrow:hover:not(.off) {
+  color: #fff;
+  border-color: #d6b96a;
+}
+
+.ga-arrow.off {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Bingo 号码行（隔行加深底，原版 m_dwBackColor 0/128 交替） */
+.ga-bingo-row {
+  position: absolute;
+  width: 164px;
+  font-size: 11px;
+  line-height: 14px;
+  letter-spacing: 0;
+  font-weight: 700;
+  color: #d49600;
+  white-space: nowrap;
+}
+
+.ga-bingo-row.odd {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.ga-icon-btn {
+  position: absolute;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  pointer-events: auto;
+  z-index: 4;
+}
+
+.ga-icon-btn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0.92;
+}
+
+.ga-icon-btn:hover img {
+  opacity: 1;
+  filter: brightness(1.35) drop-shadow(0 0 3px rgba(255, 214, 130, 0.8));
+}
+
+.ga-toast {
+  position: absolute;
+  left: 8px;
+  top: 340px;
+  width: 174px;
+  padding: 4px 6px;
+  box-sizing: border-box;
+  z-index: 6;
+  font-size: 10px;
+  line-height: 13px;
+  text-align: center;
+  color: #8fffa8;
+  background: rgba(0, 0, 0, 0.85);
+  border: 1px solid #3f6b45;
+}
+
+.ga-toast.error {
+  color: #ff9d9d;
+  border-color: #7a3a3a;
+}
+
+.ga-toast.hidden {
+  display: none;
+}
+
+/* ---------------- NPC 对话窗（原版 CSQuest::ShowDialogText） ---------------- */
+/*
+ * 底板 Message_box.ozj 拉伸到 420×190（逻辑坐标 110,110），
+ * 正文 38 字宽 × 7 行，答案 `N) xxx` 逐行排在正文下面。
+ * 字号跟事件/聊天一致：宋体 11px。
+ */
+.npc-dialog {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  z-index: 12;
+}
+
+.npc-dialog.hidden {
+  display: none;
+}
+
+.npc-dialog .nd-bg {
+  position: absolute;
+  image-rendering: pixelated;
+  pointer-events: none;
+}
+
+.nd-text {
+  position: absolute;
+  left: 132px;
+  top: 134px;
+  width: 376px;
+  height: 98px;
+  overflow: hidden;
+  font: 11px/14px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e8dcc8;
+  white-space: pre-wrap;
+  word-break: break-all;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.nd-answers {
+  position: absolute;
+  left: 132px;
+  top: 236px;
+  width: 376px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.nd-answer {
+  all: unset;
+  display: block;
+  font: 11px/13px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #ffd479;
+  text-shadow: 1px 1px 0 #000;
+  padding: 0 2px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.nd-answer:hover {
+  color: #ffffff;
+  text-shadow: 1px 1px 0 #000, 0 0 4px #ffd479;
+}
+
+/* ---------------- 帮助窗（F1，文案来自 Data/Local/chs/Text.bmd 120..157） ---------------- */
+.help-window {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  z-index: 14;
+}
+
+.help-window.hidden {
+  display: none;
+}
+
+.hw-box {
+  position: absolute;
+  background: rgba(8, 10, 14, 0.86);
+  border: 1px solid #6b5a3a;
+  box-shadow: inset 0 0 24px rgba(0, 0, 0, 0.8);
+}
+
+.hw-col {
+  position: absolute;
+  width: 268px;
+}
+
+.hw-line {
+  position: absolute;
+  left: 0;
+  height: 15px;
+  line-height: 15px;
+  white-space: pre;
+  font: 11px/15px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #c8dce6;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.hw-line.hw-title {
+  color: #ffdc96;
+  font-weight: 700;
+}
+
+.hw-hint {
+  position: absolute;
+  left: 62px;
+  bottom: 26px;
+  font: 11px/15px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #8c8272;
+}
+
+/* ------------------------------------------------------------------ */
+/* 登录界面（Data/Logo 原版贴图）                                       */
+/* ------------------------------------------------------------------ */
+/*
+ * 这里一律用原版 640×480 逻辑坐标，不再换算成百分比：
+ * `.mu-layer` 是定尺寸 640×480 的盒子，`loginSkin.ts` 按舞台宽度整层
+ * `scale()` 放大（和 `#mu-ui` 同一个套路）。源码里的
+ * `GL_DrawTexture(0xc, 195, dialogY, 250, 216)` 就能原样抄成
+ * `left:195px; top:132px; width:250px; height:216px`，
+ * 字号也直接写 12px —— 一个数就是一个原版像素，不会再因为
+ * 「百分比定位 + css 像素字号」两套尺度而对不齐。
+ *
+ * 源码 `Scene_Login.cpp`（y 都是面板内的相对偏移）：
+ *   面板  GL_DrawTexture(0xc, 195, dialogY, 250, 216)          → 0Account_new.tga
+ *   账号  RenderText(0xE3=227, y+50) / InputField(0x127=295, y+50) 宽 119
+ *   密码  RenderText(0xE3, y+72)     / InputField(0x127, y+72)
+ *   OK    GL_DrawTexture(0xd, 323, y+95, 70, 19)               → 0On_Botton.jpg
+ *   取消  GL_DrawTexture(0xe, 285, y+180, 70, 20)              → 0On_Botton2.jpg
+ *
+ * 关键：**输入框自己不用贴图**。`0Account_new.tga` 上已经画好两个凹槽
+ * （实测 x 99..220，y 48..63 / 70..85），账号密码文字就是写在凹槽里的；
+ * 再往上叠一层 `0Text_Box.jpg` 只会和凹槽差半个像素，看起来就是「错位」。
+ * 按钮同理：面板 y95 / y180 两处本来就是空 plate（实测 70×19、70×20），
+ * 原版也只在鼠标悬停时才把 `0On_Botton*.jpg` 贴上去。
+ *
+ * `dialogY` 源码收敛到 6（贴顶滑入）；这里改成 132 垂直居中。
+ */
+
+/* 逻辑层：640×480 定尺寸，缩放交给 JS（transform-origin 左上角） */
+.mu-layer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  transform-origin: 0 0;
+  z-index: 2;
+}
+
+#login.mu-screen {
+  display: block;
+  background: #000;
+}
+
+#login .mu-bg {
+  position: absolute;
+  inset: 0;
+  background: #05070a center/cover no-repeat;
+  image-rendering: auto;
+}
+
+#login .mu-bg::after {
+  /* 背景压暗一点，否则 MU 标志和金属面板会糊在亮天里 */
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 42%, rgba(0, 0, 0, 0) 30%, rgba(0, 0, 0, 0.55) 100%);
+}
+
+/*
+ * 3D 背景层：源码 `GL_BeginViewport(0, 0x50, 0x280, 0x140)`
+ * → 640×320 的横条，上面 80px / 下面 80px 留黑（原版登录画面就是这样）。
+ * 模型没加载出来时保持 `display:none`，退回上面那层 2D 天空。
+ */
+#login-3d {
+  position: absolute;
+  left: 0;
+  top: 5.8333%; /* 28/480 —— 实机截图量出来的黑边高度 */
+  width: 100%;
+  height: 77.5%; /* 372/480 */
+  display: none;
+  z-index: 1;
+}
+
+#login.has3d #login-3d { display: block; }
+
+/* 3D 就位后 2D 天空让位，上下留真正的黑边 */
+#login.has3d .mu-bg { display: none; }
+
+/* 立体 MU 字标由 3D 场景里的 Logo03 负责，2D 那张就收起来（不然两个重影） */
+#login.has3d .mu-title { display: none; }
+
+/* MU 标志：两个界面共用定位规则，尺寸各自覆盖 */
+.mu-title {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  background: center/contain no-repeat;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Logo.ozj 是 256×128（2:1），宽 220 → 高 110，正好落在面板上沿之上 */
+#login .mu-title {
+  top: 10px;
+  width: 220px;
+  height: 110px;
+  filter: drop-shadow(0 6px 18px rgba(0, 0, 0, 0.75));
+}
+
+/* 面板：195,132 250×216（贴图自身带 250:216 比例，直接铺满） */
+#login .mu-panel {
+  position: absolute;
+  left: 195px;
+  top: 132px;
+  width: 250px;
+  height: 216px;
+  padding: 0;
+  margin: 0;
+  border: 0;
+  background: center/100% 100% no-repeat;
+  box-shadow: none;
+}
+
+/* 面板内的元素都用绝对定位（相对面板左上角） */
+#login .mu-label {
+  position: absolute;
+  font: 12px/12px 'SimSun', '宋体', sans-serif;
+  color: #d2e6ff;
+  text-shadow: 1px 1px 0 #000;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+/* x=32/250，y=50 / 72（和输入文字同一行） */
+#login .mu-acc-label { left: 32px; top: 48px; }
+#login .mu-pw-label { left: 32px; top: 70px; }
+
+/*
+ * 输入框：盖住贴图凹槽 x99..220 / y48..63、70..85（122×16）。
+ * 文字从 100 起（左内边距 1），纵向 16px 行高 → 字形顶部落在 +50 / +72，
+ * 跟原版 `InputField(295, y+50)` 一模一样。
+ */
+#login .mu-input {
+  position: absolute;
+  left: 99px;
+  width: 122px;
+  height: 16px;
+  padding: 0 0 0 1px;
+  margin: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  box-shadow: none;
+  color: #d2e6ff;
+  font: 12px/16px 'SimSun', '宋体', sans-serif;
+  letter-spacing: 0;
+  caret-color: #d2e6ff;
+}
+
+#login .mu-acc-input { top: 48px; }
+#login .mu-pw-input { top: 70px; }
+
+#login .mu-input::placeholder { color: rgba(210, 230, 255, 0.35); }
+
+/* 聚焦时不要浏览器默认的发光边框，只在凹槽里提一点亮 */
+#login .mu-input:focus {
+  background: rgba(120, 170, 220, 0.08);
+}
+
+/*
+ * 按钮：默认透明（露出面板上的空 plate），悬停才贴 `0On_Botton*.jpg` ——
+ * 原版 `Scene_Login` 就是在 `if (鼠标在范围内)` 里才 `GL_DrawTexture(0xd/0xe)`。
+ * 贴图 URL 由 `loginSkin.ts` 写进 `--mu-btn-hover`。
+ */
+#login .mu-btn {
+  position: absolute;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent center/100% 100% no-repeat;
+  color: #d2e6ff;
+  font: 12px/1 'SimSun', '宋体', sans-serif;
+  letter-spacing: 0;
+  text-shadow: 1px 1px 0 #000;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+#login .mu-btn:hover:not(:disabled),
+#login .mu-btn:focus-visible {
+  background-image: var(--mu-btn-hover, none);
+}
+
+#login .mu-btn:disabled {
+  cursor: default;
+  filter: grayscale(0.8) brightness(0.65);
+}
+
+/* OK: 323,227 → 面板内 128,95，70×19 */
+#login .mu-ok {
+  left: 128px;
+  top: 95px;
+  width: 70px;
+  height: 19px;
+}
+
+/* 取消: 285,312 → 面板内 90,180，70×20 */
+#login .mu-cancel {
+  left: 90px;
+  top: 180px;
+  width: 70px;
+  height: 20px;
+}
+
+/* 面板下沿的版本号（原版是 0x14f,0x1df 的版权行，这里换成版本号） */
+#login .mu-version {
+  position: absolute;
+  left: 195px;
+  top: 352px;
+  width: 250px;
+  text-align: center;
+  font: 11px/14px 'SimSun', '宋体', sans-serif;
+  color: rgba(200, 180, 140, 0.6);
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
+#login .mu-foot-left,
+#login .mu-foot-right {
+  position: absolute;
+  bottom: 8px;
+  font: 11px/14px 'SimSun', '宋体', sans-serif;
+  color: rgba(190, 170, 130, 0.55);
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
+#login .mu-foot-left { left: 12px; }
+#login .mu-foot-right { right: 12px; }
+
+/* ------------------------------------------------------------------ */
+/* 登录第一步：选择线路（`Scene_Login_ServerSelect.cpp`）                 */
+/* ------------------------------------------------------------------ */
+/*
+ * 坐标 / 尺寸全部照抄源码 640×480 逻辑像素：
+ *   服务器组两列 x=150（非 PVP）/ 375（PVP），行 16px 高、底板压成 70×16
+ *   线路子表 x=230、134×20
+ *   负载条 x=248 起、每 5px 一个 3×3 方块，最多 20 个
+ * 底板 `0box.ozj`（134×30）用 `background-size:100% 100%` 拉成目标尺寸，
+ * 上色靠 `background-color + background-blend-mode:multiply`（对应原版
+ * `glColor3f` 给纹理整体染色）。
+ */
+
+#login .sv {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+}
+
+#login .sv.hidden { display: none; }
+
+/* 选线路时收起账号面板（同一张背景，两步切换） */
+#login-layer[data-stage='servers'] #mu-account-panel { display: none; }
+#login-layer[data-stage='servers'] .mu-title { opacity: 0.9; }
+
+#login .sv-head {
+  position: absolute;
+  left: 150px;
+  top: 196px;
+  font: 12px/14px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  letter-spacing: 2px;
+  color: #e8d6b0;
+  text-shadow: 1px 1px 0 #000, 0 0 8px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+#login .sv-row {
+  position: absolute;
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 100% 100%;
+  image-rendering: pixelated;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+#login .sv-row.sel {
+  outline: 1px solid rgba(255, 226, 160, 0.75);
+  outline-offset: -1px;
+  box-shadow: 0 0 10px rgba(255, 190, 90, 0.35);
+}
+
+#login .sv-row:hover { filter: brightness(1.25); }
+
+#login .sv-row-text {
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  transform: translateX(-50%);
+  /* 10px：底板只有 70px 宽（源码 `GL_DrawTexture(0x12, x, y, 70, 16)`），
+     再大就会溢出到中间那条线路子表上 */
+  font: 10px/12px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #ffe8d4;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#login .sv-row.sel .sv-row-text { color: #fff6e2; }
+
+#login .sv-ch-text {
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  transform: translateX(-50%);
+  font: 10px/12px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #ffe8d4;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+#login .sv-dot {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  background: #2b2f34;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+#login .sv-dot.on.s-low { background: #8ef0a4; }
+#login .sv-dot.on.s-normal { background: #e6ebf2; }
+
+#login .sv-hint {
+  position: absolute;
+  left: 150px;
+  top: 438px;
+  font: 11px/14px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: rgba(216, 200, 166, 0.8);
+  text-shadow: 1px 1px 0 #000;
+  pointer-events: none;
+}
+
+#login .sv-hint.error { color: #ff9a7a; }
+
+#login .sv-refresh {
+  position: absolute;
+  left: 150px;
+  top: 454px;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: 11px/14px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: rgba(190, 170, 130, 0.7);
+  text-shadow: 1px 1px 0 #000;
+  text-decoration: underline dotted;
+  cursor: pointer;
+}
+
+#login .sv-refresh:hover { color: #ffe8c0; }
+
+
+/* ------------------------------------------------------------------ */
+/* 选角界面（3D 背景 + 原版框 + 三块銘牌，坐标 640×480 逻辑层）            */
+/* ------------------------------------------------------------------ */
+/*
+ * 原版布局（`Scene_CharSelect.cpp` + `Render/Scene_CharPreview.cpp::FUN_005239a0`）：
+ *
+ *   3D 背景   Logo05.bmd 全屏（`GL_BeginViewport(0,0,0x280,0x1e0)`）
+ *   边框      0xC Interface01 256×86  → 右 (320,0) 原图 / 左 (64,0)  镜像
+ *             0xD Interface02  64×256 → 右 (576,0) 原图 / 左 (0,0)    镜像
+ *             0xE Interface03  64×224 → 右 (576,256) 原图 / 左 (0,256) 镜像
+ *             0xF Interface04 256×32  → 右 (320,448) 原图 / 左 (64,448) 镜像
+ *
+ *   新建銘牌  199×109 @ (221,6)   悬停标签 70×25 @ (286,81)
+ *   删除銘牌  205×88  @ (0,116)   悬停按钮 70×19 @ (128,148)
+ *   进入銘牌  205×88  @ (434,116) 悬停按钮 70×19 @ (441,148)
+ *
+ * 边框顺序不能反：源码 `FUN_005239a0` 里 u 从 0→1 画的那份在**右边**，
+ * 左边那份 u 是 1→0（镜像）。所以贴图原样先摆右边，左边才 flip。
+ *
+ * 角色名字原版画在 3D 角色头顶（`Camera_ProjectWorldToScreen` 后画两行字），
+ * 这里由 `charScene.syncLabels()` 每帧投影定位。
+ */
+
+#charselect.mu-screen {
+  display: block;
+  background: #000;
+}
+
+#charselect .mu-bg {
+  position: absolute;
+  inset: 0;
+  background: #05070a center/cover no-repeat;
+}
+
+#charselect .mu-bg::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(ellipse at 50% 45%, rgba(0, 0, 0, 0.1) 25%, rgba(0, 0, 0, 0.7) 100%);
+}
+
+/* 3D 背景层：整屏，由 `login/charScene.ts` 建 canvas */
+#char-3d {
+  position: absolute;
+  inset: 0;
+  display: none;
+  z-index: 1;
+}
+
+#charselect.has3d #char-3d { display: block; }
+#charselect.has3d .mu-bg { display: none; }
+
+/* ---------------- 原版边框（Interface01..04） ---------------- */
+
+.cf {
+  position: absolute;
+  background: center/100% 100% no-repeat;
+  pointer-events: none;
+}
+
+.cf.flip { transform: scaleX(-1); } /* 左半那份：贴图镜像 */
+
+#cf-top-l { left: 64px; top: 0; width: 256px; height: 86px; }
+#cf-top-r { left: 320px; top: 0; width: 256px; height: 86px; }
+#cf-left-1 { left: 0; top: 0; width: 64px; height: 256px; }
+#cf-right-1 { left: 576px; top: 0; width: 64px; height: 256px; }
+#cf-left-2 { left: 0; top: 256px; width: 64px; height: 224px; }
+#cf-right-2 { left: 576px; top: 256px; width: 64px; height: 224px; }
+#cf-bot-l { left: 64px; top: 448px; width: 256px; height: 32px; }
+#cf-bot-r { left: 320px; top: 448px; width: 256px; height: 32px; }
+
+/* ---------------- 三块銘牌（透明按钮 + 悬停高亮） ---------------- */
+
+.cf-plaque {
+  position: absolute;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent center/100% 100% no-repeat;
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+
+.cf-plaque::after {
+  content: '';
+  position: absolute;
+  background: center/100% 100% no-repeat var(--hover-img, none);
+  opacity: 0;
+  transition: opacity 0.1s;
+  pointer-events: none;
+}
+
+.cf-plaque:hover:not(:disabled)::after { opacity: 1; }
+.cf-plaque:disabled { cursor: default; opacity: 0.45; filter: grayscale(0.6); }
+
+.plq-new { left: 221px; top: 6px; width: 199px; height: 109px; }
+/* 悬停标签在 (286,81) → 相对銘牌 (65,75) */
+.plq-new::after { left: 65px; top: 75px; width: 70px; height: 25px; }
+
+.plq-del { left: 0; top: 116px; width: 205px; height: 88px; }
+/* 按钮在 (128,148) → 相对 (128,32) */
+.plq-del::after { left: 128px; top: 32px; width: 70px; height: 19px; }
+
+.plq-ok { left: 434px; top: 116px; width: 205px; height: 88px; }
+/* 按钮在 (441,148) → 相对 (7,32) */
+.plq-ok::after { left: 7px; top: 32px; width: 70px; height: 19px; }
+
+/* ---------------- 角色名字标签（原版画在 3D 角色头顶） ---------------- */
+/*
+ * 原版：`Camera_ProjectWorldToScreen` 投影角色坐标后画两行字 ——
+ * 名字（粗体白）+「职业 等级」（白）。`charScene.ts` 每帧把 `left/top`
+ * 写成投影点，所以这里只负责样式和「以底边中点为锚」。
+ */
+
+#char-list {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.char-card {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  padding: 0 2px 1px;
+  background: none;
+  border: 0;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+
+.char-card.offscreen { display: none; }
+
+.char-card .cslot { display: none; }
+
+.char-card .cname {
+  font: 12px/15px 'SimSun', '宋体', sans-serif;
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 1px 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.9);
+}
+
+.char-card .cinfo {
+  font: 11px/14px 'SimSun', '宋体', sans-serif;
+  color: #ffffff;
+  text-shadow: 1px 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.9);
+}
+
+/*
+ * 选中：模型本身会被 `charScene.setHighlight()` 打亮一层，标签这边再放大一点、
+ * 加金色光晕，保证「点下去有明显反馈」。
+ */
+.char-card.selected {
+  transform: translate(-50%, -100%) scale(1.14);
+  z-index: 2;
+}
+
+.char-card.selected .cname {
+  color: #fff2cc;
+  text-shadow: 1px 1px 2px #000, 0 0 8px rgba(255, 200, 90, 0.95), 0 0 16px rgba(255, 170, 40, 0.6);
+}
+
+.char-card.selected .cinfo {
+  color: #ffe9b8;
+  text-shadow: 1px 1px 2px #000, 0 0 8px rgba(255, 190, 80, 0.7);
+}
+
+.char-card:hover .cname { color: #fff5d8; }
+
+/* 提示行（「先选一个角色」之类）：压在底框中间，不挡銘牌和返回键 */
+#charselect .panel-msg {
+  position: absolute;
+  left: 160px;
+  top: 426px;
+  width: 320px;
+  height: 16px;
+  font: 11px/16px 'SimSun', '宋体', sans-serif;
+  color: #ffd08a;
+  text-shadow: 1px 1px 0 #000;
+  text-align: center;
+  pointer-events: none;
+}
+
+#charselect .panel-msg.error { color: #ff9a8a; }
+#charselect .panel-msg:empty { display: none; }
+
+/* 「返回登录」：原版没有这个键，网页端补一个，压在底框左侧 */
+.cf-back {
+  position: absolute;
+  left: 70px;
+  top: 452px;
+  width: 74px;
+  height: 22px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: rgba(190, 170, 130, 0.5);
+  font: 11px/22px 'SimSun', '宋体', sans-serif;
+  text-align: left;
+  text-shadow: 1px 1px 0 #000;
+  cursor: pointer;
+}
+
+.cf-back:hover { color: #ffe6a8; }
+
+/* 选中时左右两块銘牌才滑进来（原版 DAT_005616a8: -205 → 0） */
+.cf-plaque.plq-del,
+.cf-plaque.plq-ok {
+  transition: transform 0.28s ease, opacity 0.28s ease, filter 0.12s;
+}
+
+#charselect:not(.has-sel) .plq-del,
+#charselect:not(.has-sel) .plq-ok {
+  opacity: 0;
+  pointer-events: none;
+}
+
+#charselect:not(.has-sel) .plq-del { transform: translateX(-205px); }
+#charselect:not(.has-sel) .plq-ok { transform: translateX(205px); }
+
+/* 5 个角色槽全满：NEW CHARACTER 那块銘牌整块不显示 */
+#charselect.slots-full .plq-new {
+  display: none;
+}
+
+/* 建角时：名字标签和三块銘牌都收起来，别压在面板上（原版也只剩面板） */
+#charselect.creating #char-list,
+#charselect.creating .cf-plaque { opacity: 0; pointer-events: none; }
+
+/* 3D 没起来时的兜底：标签排成中间一列，至少还能点 */
+#char-list.no3d {
+  inset: auto;
+  left: 209px;
+  top: 150px;
+  width: 222px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#char-list.no3d .char-card {
+  position: relative;
+  transform: none;
+  left: auto !important;
+  top: auto !important;
+  text-align: left;
+}
+
+/* ---------------- 新建角色面板 ---------------- */
+
+#create-panel {
+  position: absolute;
+  left: 214px;
+  top: 52px;
+  width: 213px;
+  height: 375px;
+  z-index: 3;
+}
+
+#create-panel.hidden { display: none; }
+
+.cp-art {
+  position: absolute;
+  left: 0;
+  width: 213px;
+  background: center/100% 100% no-repeat;
+}
+
+.cp-top { top: 0; height: 256px; }
+.cp-bottom { top: 256px; height: 119px; }
+
+/* 职业头像：源码那个 74×79 的小视口（0x11d, y+0x5a, 0x4a, 0x4f） */
+.cp-preview {
+  position: absolute;
+  left: 71px;
+  top: 90px;
+  width: 74px;
+  height: 79px;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8));
+}
+
+/* 名字输入：面板内 (71,180)，宽 73（源码 InputTextWidth=0x49） */
+.cp-name {
+  position: absolute;
+  left: 71px;
+  top: 180px;
+  width: 73px;
+  height: 16px;
+  padding: 0 2px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: #d2e6ff;
+  font: 12px/16px 'SimSun', '宋体', sans-serif;
+  caret-color: #d2e6ff;
+}
+
+/* 职业名：面板内 (71,200) */
+.cp-class {
+  position: absolute;
+  left: 71px;
+  top: 200px;
+  width: 73px;
+  height: 15px;
+  font: 12px/15px 'SimSun', '宋体', sans-serif;
+  color: #ffd9a0;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+}
+
+/* 透明热区：箭头 2×2（上排换职业），OK/CANCEL 在底图 y=349 */
+.cp-hot {
+  position: absolute;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.cp-hot:hover { background: rgba(255, 226, 160, 0.16); }
+.cp-hot:active { background: rgba(255, 226, 160, 0.28); }
+.cp-hot:disabled { cursor: default; background: none; }
+
+.cp-prev { left: 149px; top: 196px; width: 20px; height: 19px; }
+.cp-next { left: 170px; top: 196px; width: 20px; height: 19px; }
+.cp-ok { left: 121px; top: 349px; width: 72px; height: 21px; }
+.cp-cancel { left: 21px; top: 349px; width: 72px; height: 21px; }
+
+/* 面板里的提示行（重名/非法字符/服务端拒绝）落在底部那块空区 */
+.cp-msg {
+  position: absolute;
+  left: 14px;
+  top: 300px;
+  width: 185px;
+  font: 11px/15px 'SimSun', '宋体', sans-serif;
+  color: #ffb0a0;
+  text-shadow: 1px 1px 0 #000;
+  text-align: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.cp-msg.on { opacity: 1; }
+
+/* ------------------------------------------------------------------ */
+/* ESC 菜单（原版 `UI_StatsPanel.cpp` state 0x6e / 0x96）               */
+/* ------------------------------------------------------------------ */
+/*
+ * 坐标全部是原版的 640×480 逻辑像素，写死在 JS 里（`ui/escMenu.ts` 的
+ * BTN_X / MAIN_Y0 / OPT_Y0），这里只管长相：
+ *
+ *   按钮 = `Interface/Message_box.OZJ` 整张拉成 120×22
+ *          （中间一团暗、上下各一条亮边 —— 原版就是这道凹槽）
+ *   文字 = 白色、水平居中、按钮顶 +5
+ *   悬停 = 同一张图加色再画一遍（原版 glColor3f(0.8,0.6,0.4) + additive），
+ *          这里用 ::after + mix-blend-mode: screen 近似
+ */
+/* `#mu-ui` 整层是 pointer-events: none（空白处要让 3D 画面能点），
+ * 所以按钮必须自己把指针接回来，否则悬停高亮和点击都不响应。 */
+#esc-menu {
+  position: absolute;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+}
+
+#esc-menu.hidden { display: none; }
+
+.esc-box {
+  position: absolute;
+  inset: 0;
+}
+
+.esc-box.hidden { display: none; }
+
+.esc-btn {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: inherit;
+  pointer-events: auto;
+  color: #ffffff;
+  font: 12px/1 'SimSun', '宋体', sans-serif;
+  letter-spacing: 0;
+  text-shadow: 1px 1px 0 #000, 0 0 3px rgba(0, 0, 0, 0.85);
+  /* 贴图没加载出来时的兜底：一道暗底 + 上下亮边，形状和 Message_box 一致 */
+  background:
+    var(--esc-plate, none) center/100% 100% no-repeat,
+    linear-gradient(#8a8175 0 2px, #23201c 2px calc(100% - 2px), #6d6459 calc(100% - 2px) 100%);
+  background-blend-mode: normal;
+}
+
+/* 悬停：叠一层同样的贴图做加色，顺带暖色调（近似 0.8,0.6,0.4） */
+.esc-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--esc-plate, none) center/100% 100% no-repeat;
+  mix-blend-mode: screen;
+  filter: sepia(0.45) saturate(2.2) brightness(1.15);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.08s linear;
+}
+
+.esc-btn:hover::after { opacity: 1; }
+
+.esc-btn.esc-noop,
+.esc-btn:disabled {
+  cursor: inherit;
+}
+
+/* 标题行（0x96 的「选项」）：没有底板，就是一行居中的字 */
+.esc-btn.esc-head {
+  background: none;
+  text-shadow: 1px 1px 0 #000, 0 0 4px rgba(0, 0, 0, 0.9);
+}
+
+.esc-btn.esc-head::after { display: none; }
+
+.esc-label {
+  position: relative;
+  z-index: 1;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* 物品跨面板拖拽（ui/itemDrag.ts）                                    */
+/* ------------------------------------------------------------------ */
+/* 拖拽中：整页光标变抓取，避免在别的面板上出现「可点」的假象 */
+body.item-dragging,
+body.item-dragging * {
+  cursor: grabbing !important;
+}
+
+/* 当前指针所在的面板：给一圈暖色描边 + 内侧微光，提示「松手就放这里」 */
+[data-drag-panel].drop-hot {
+  outline: 1px solid rgba(255, 220, 140, 0.65);
+  outline-offset: -1px;
+  box-shadow: inset 0 0 26px rgba(255, 200, 100, 0.16);
+}
+
+/* ---------------- 服务器传送（原版 RenderServerDivision） ---------------- */
+
+/*
+ * 布局全部来自 `Render/HUD_Pass6.cpp:323`，坐标一个数一个数抄：
+ *   底板 450,0 190×433（Item_Back01 256 + Item_Back02 177，中间叠一条 Trading_line）
+ *   标题 8 行居中在 545，从 y=50 起每行 20
+ *   复选框 475,240 16×16；说明文字 494,245
+ *   确定 485,320 / 取消 485,350，都是 120×24
+ */
+/*
+ * 根节点铺满整个 640×480 逻辑层，**不是**只占右边那条 190 宽。
+ *
+ * 一开始把它做成 `left:450; width:190`，结果子元素那些绝对坐标（复选框 475、
+ * 按钮 485）全都相对根又加了一遍 450 —— 实际落到 925px 去了，一个都点不到。
+ * 现在根铺满、坐标就是原版的绝对坐标，和 `RenderServerDivision` 一个字面量
+ * 对得上；空白处 `pointer-events:none`，不会挡住 3D 画面的点击。
+ */
+#svd-panel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 640px;
+  height: 480px;
+  z-index: 50;
+  pointer-events: none;
+}
+
+#svd-panel.hidden {
+  display: none;
+}
+
+.svd-plate {
+  position: absolute;
+  image-rendering: pixelated;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* 标题八行：居中在 450+95 = 545，所以容器就是一个 x=450 宽 190 的块 */
+.svd-terms {
+  position: absolute;
+  left: 450px;
+  top: 50px;
+  width: 190px;
+  pointer-events: none;
+}
+
+.svd-line {
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  /* 11px：面板只有 190 宽，最长的一行「1）将您的帐号移动到分割的服务器后，」
+     是 19 个全角字，12px 会顶出边界被裁掉（原版 Tahoma bold 在中文上窄一点）。 */
+  font: 11px/20px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  /* 原版 m_dwTextColor = 0xFFD2E6FF */
+  color: #d2e6ff;
+  text-shadow: 1px 1px 0 #000, 0 0 3px rgba(0, 0, 0, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.svd-check {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  cursor: pointer;
+  pointer-events: auto;
+  background:
+    var(--svd-check-off, none) center/100% 100% no-repeat,
+    #1b1b1b;
+  box-shadow: inset 0 0 0 1px rgba(190, 210, 230, 0.35);
+}
+
+.svd-check.on {
+  background:
+    var(--svd-check-on, none) center/100% 100% no-repeat,
+    #1b1b1b;
+  /* 原版勾上之后整块染成 0xFFFF55FF 那种暖紫高亮 */
+  filter: drop-shadow(0 0 3px rgba(255, 85, 255, 0.55));
+}
+
+.svd-checklabel {
+  position: absolute;
+  font: 12px/16px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  /* 原版 0xFF66CCDF */
+  color: #66ccdf;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.svd-btn {
+  position: absolute;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  pointer-events: auto;
+  color: #ffffff;
+  font: 12px/1 'SimSun', '宋体', sans-serif;
+  text-shadow: 1px 1px 0 #000, 0 0 3px rgba(0, 0, 0, 0.85);
+  background:
+    var(--svd-plate, none) center/100% 100% no-repeat,
+    linear-gradient(#8a8175 0 2px, #23201c 2px calc(100% - 2px), #6d6459 calc(100% - 2px) 100%);
+}
+
+.svd-btn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: var(--svd-plate, none) center/100% 100% no-repeat;
+  mix-blend-mode: screen;
+  filter: sepia(0.45) saturate(2.2) brightness(1.15);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.08s linear;
+}
+
+.svd-btn:hover::after {
+  opacity: 1;
+}
+
+/* 没勾选时「确定」是灰的（原版 glColor3f(0.5,0.5,0.5)） */
+.svd-btn.dim {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.svd-confirm {
+  position: absolute;
+  /* 确认框是**屏幕居中**的（原版 ShowCheckBox 那套），不是贴在右边面板里。
+     根节点铺满 640×480，所以 640/2 - 340/2 = 150。 */
+  left: 150px;
+  top: 170px;
+  width: 340px;
+  padding: 18px 14px 14px;
+  background: rgba(10, 12, 16, 0.95);
+  border: 1px solid rgba(216, 181, 106, 0.55);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.65);
+  text-align: center;
+  pointer-events: auto;
+}
+
+.svd-confirm.hidden {
+  display: none;
+}
+
+.svd-confirm-text {
+  font: 13px/20px 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #e8dfcc;
+  margin-bottom: 16px;
+}
+
+.svd-confirm-btns {
+  display: flex;
+  gap: 14px;
+  justify-content: center;
+}
+
+.svd-mini {
+  position: relative;
+  width: 96px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+  color: #fff;
+  font: 12px/1 'SimSun', '宋体', sans-serif;
+  text-shadow: 1px 1px 0 #000;
+  background:
+    var(--svd-plate, none) center/100% 100% no-repeat,
+    linear-gradient(#8a8175 0 2px, #23201c 2px calc(100% - 2px), #6d6459 calc(100% - 2px) 100%);
+}

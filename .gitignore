@@ -1,0 +1,18 @@
+# ── 依赖 / 构建产物 ────────────────────────────────────────────────
+# dist/Data 是资源本体（208MB，进仓库）；其余 dist 内容由 CI `npm run build` 生成
+node_modules/
+dist/assets/
+dist/index.html
+dist/404.html
+dist-verify/
+.tmp/
+
+# ── 运行时 / 调试产物 ─────────────────────────────────────────────
+*.log
+shots/
+/*.png
+probe*.png
+net-test.html
+
+# ── 本地协同数据 ──────────────────────────────────────────────────
+.workbuddy/

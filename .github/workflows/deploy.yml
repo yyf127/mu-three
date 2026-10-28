@@ -1,0 +1,55 @@
+# GitHub Pages：push 到 main → npm ci → vite build → 发布 dist/
+#
+# 为什么不用「分支直接发布」：这个仓库是**源码**仓库，`dist/index.html`、
+# `dist/assets/` 都是构建产物（.gitignore 已排除），只有 `dist/Data`（208MB 资源）
+# 进仓库。分支发布会让线上直接 404，必须走 Actions 构建后再发 artifact。
+name: deploy-pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 同时只跑一个部署；新推送取消排队中的旧构建
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # tsc --noEmit && vite build；base 默认 /mu-three/（仓库名），
+      # 换仓库名/自定义域名时改这里：MU_BASE=/ npm run build
+      - name: Build
+        run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,35 @@
+{
+  "name": "mu-three-client",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MU Online H5 client (three.js) loading original .bmd/.ozj/.ozt assets directly",
+  "scripts": {
+    "dev": "vite --port 5180 --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --port 5180",
+    "tsc": "tsc --noEmit",
+    "net:bridge": "node server/bridge.mjs",
+    "net:mock": "node server/mock-connect.mjs 14405",
+    "net:probe": "node tools/connect-probe.mjs 127.0.0.1 14405",
+    "net:probe:ws": "node tools/connect-probe.mjs --ws 5181 14405",
+    "test:net": "tsc src/net/crypto.ts src/net/packet.ts --outDir .tmp/net --module commonjs --target es2020 --moduleResolution node --skipLibCheck && node -e \"require('fs').writeFileSync('.tmp/net/package.json','{\\\"type\\\":\\\"commonjs\\\"}')\" && node tools/net-selftest.cjs",
+    "net:login": "node tools/login-probe.mjs 127.0.0.1 55901",
+    "net:login:browser": "node tools/net-login-probe.mjs 1234 1234",
+    "app:probe": "node tools/app-probe.mjs 1234 1234 1234",
+    "entity:probe": "node tools/entity-probe.mjs",
+    "attack:probe": "node tools/attack-probe.mjs",
+    "packet:test": "node tools/packet-test.mjs",
+    "v43:probe": "node tools/v43-probe.mjs",
+    "serve:gh": "node tools/serve-gh.mjs"
+  },
+  "dependencies": {
+    "three": "^0.169.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.169.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
