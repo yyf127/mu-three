@@ -140,7 +140,7 @@ function cleanBuild(): Plugin {
     name: 'mu-clean-build',
     apply: 'build',
     buildStart() {
-      for (const p of ['assets', 'index.html', '404.html']) {
+      for (const p of ['assets', 'index.html', '404.html', 'demo']) {
         rmSync(join(DIST, p), { recursive: true, force: true });
       }
     },
@@ -190,6 +190,8 @@ function demoAlias(): Plugin {
       const index = join(DIST, 'index.html');
       if (!existsSync(index)) return;
       copyFileSync(index, join(DIST, '404.html'));
+      mkdirSync(join(DIST, 'demo'), { recursive: true });
+      copyFileSync(index, join(DIST, 'demo', 'index.html'));
       console.log('[mu-demo-alias] dist/404.html 已生成（GitHub Pages 的 /demo 兜底）');
 
       /*
