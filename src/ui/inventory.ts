@@ -334,6 +334,12 @@ export class InventoryPanel {
         stopHoverSpin();
       });
       box.addEventListener('pointerdown', e => this.onPointerDown(e, def.index));
+      /*
+       * 单击（不拖）：`pointerdown` 只负责「可能开始的拖拽」，真正的「点了一下」
+       * 原来没人接 —— `onClick` 定义了却从来没被调用过，于是「点背包物品」什么都不发生
+       * （商店里想卖、仓库里想存都点不动）。这里补上 click。
+       */
+      box.addEventListener('click', e => this.onClick?.(def.index, { shift: e.shiftKey }));
 
       this.equipEl.appendChild(box);
     }
@@ -386,6 +392,7 @@ export class InventoryPanel {
         stopHoverSpin();
       });
       cell.addEventListener('pointerdown', e => this.onPointerDown(e, WEAR + i));
+      cell.addEventListener('click', e => this.onClick?.(WEAR + i, { shift: e.shiftKey }));
 
       this.gridEl.appendChild(cell);
     }

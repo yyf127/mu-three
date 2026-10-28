@@ -393,8 +393,12 @@ npm run net:login:browser   # 无头浏览器跑 net-test.html（同一套前端
 | 经验 / 掉率 / 掉落池 | 经验 ≈ `Lv²×1.6 + Lv×8`；掉落池 = `Item.txt` 里「物品等级 ∈ [怪等级-2, +4]」且可掉的物品 |
 | 掉落物 | 击杀后掉在脚下，**按 Alt 或悬停看名字**，走过去点它就进背包 |
 
-怪物头顶有名字 + 血条（挨打时实时变化）。`__MU_APP__` 上有调试口：
-`demoMonsters()` / `progress()` / `demoDrops()` / `bag()` / `attack(id)`。
+怪物头顶有名字 + 血条（挨打时实时变化）。**点怪就上去打**（自动连续攻击），
+**点 NPC 对话**：商人开商店（货架来自 `Shop/*.txt`）、Safety Guardian 开仓库
+（存在 `localStorage`，刷新还在）。离线演示里单击即成交：点商品买下、点背包物品卖出/存入。
+
+`__MU_APP__` 上有调试口：`demoMonsters()` / `demoNpcs()` / `demoShop()` /
+`demoWarehouse()` / `progress()` / `demoDrops()` / `bag()` / `attack(id)`。
 
 ### 地图资源是「地图号 + 1」
 

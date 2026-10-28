@@ -20,7 +20,7 @@
  * 输出是**派生数据**：本地跑、结果入库（`server/data/game.json`），CI 不跑
  * （CI 里没有 MuServer）。
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -165,6 +165,55 @@ function parseItems() {
   return out;
 }
 
+/**
+ * 商店：`ShopManager.txt` 给出「NPC 职业 → 商店号」，`Shop/NNN - 名字.txt` 是货架。
+ *
+ *   ShopManager:  0 <tab> 251 <tab> //Hanzo the Blacksmith
+ *   Shop/000:     14,001 <tab> 0 <tab> 255 <tab> 0 <tab> 0 <tab> 0 <tab> 0 <tab> * <tab> *  // 小治疗药水
+ *                 └ 物品 = group,index（type = group*32+index）、Level、Dur、Skill、Luck、Opt、Exc
+ *
+ * 同一个文件里会有多段重复药水（不同耐久档，服务端按 `Interface.state` 挑一段），
+ * 演示只留第一段，按 `type+level` 去重。
+ */
+function parseShops() {
+  const manager = readTable('ShopManager.txt');
+  const files = readdirSync(join(SRC, 'Shop'));
+  const out = {};
+  for (const r of manager) {
+    const shopNo = num(r[0], -1);
+    const cls = num(r[1], -1);
+    if (shopNo < 0 || cls < 0) continue;
+    const file = files.find(f => f.startsWith(String(shopNo).padStart(3, '0') + ' -'));
+    if (!file) continue;
+    const text = readFileSync(join(SRC, 'Shop', file), 'utf8');
+    const items = [];
+    const seen = new Set();
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith('//')) continue;
+      const c = line.split('\t').map(x => x.trim());
+      const idx = (c[0] ?? '').split(',');
+      if (idx.length !== 2) continue;
+      const type = num(idx[0]) * 32 + num(idx[1]);
+      const level = num(c[1]);
+      const key = `${type}:${level}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push([
+        type,
+        level,
+        num(c[2], 0), // 耐久（药水这里是堆叠上限）
+        num(c[3]), // skill
+        num(c[4]), // luck
+        num(c[5]), // option
+        num(c[6]), // excellent
+      ]);
+    }
+    if (items.length) out[cls] = { name: file.replace(/^\d+ - /, '').replace(/\.txt$/i, ''), items };
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------ */
 /* 输出                                                                */
 /* ------------------------------------------------------------------ */
@@ -173,6 +222,7 @@ const monsters = parseMonsters();
 const spawns = parseSpawns();
 const skills = parseSkills();
 const items = parseItems();
+const shops = parseShops();
 
 const payload = {
   meta: {
@@ -185,12 +235,15 @@ const payload = {
       skills: skills.length,
       items: items.length,
       droppable: items.filter(it => it[2] !== 0).length,
+      shops: Object.keys(shops).length,
+      shopItems: Object.values(shops).reduce((n, s) => n + s.items.length, 0),
     },
   },
   monsters,
   spawns,
   skills,
   items,
+  shops,
 };
 
 mkdirSync(dirname(OUT), { recursive: true });

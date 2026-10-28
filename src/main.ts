@@ -201,7 +201,14 @@ import { DamageTexts } from './ui/damageText';
 import { WorldTags, type TagItem } from './ui/worldTags';
 import { EscMenu } from './ui/escMenu';
 import { monsterMaxLifeOf, monsterNameOf } from './data/monsters';
-import { gameConfigStatus, monsterTable, spawnTable, type MonsterDef } from './data/gameConfig';
+import {
+  gameConfigStatus,
+  monsterTable,
+  shopOf,
+  spawnTable,
+  type MonsterDef,
+  type ShopDef,
+} from './data/gameConfig';
 import { rollDrops } from './data/loot';
 import { ItemLabels, type GroundLabel } from './ui/itemLabels';
 import { MinimapPanel, type MinimapMark } from './ui/minimapPanel';
@@ -1044,6 +1051,10 @@ npcPanel.onRepairAll = () => {
   console.log(`[shop] 0x34 全部修理（slot=0xFF, type=0，共 ${worn.length} 件）`);
 };
 npcPanel.onDepositAll = () => {
+  if (!connection?.connected) {
+    depositMoneyLocal();
+    return;
+  }
   const money = currentChar?.info?.money ?? 0;
   if (money <= 0) {
     npcPanel.toast('身上没有金币', 'error');
@@ -1052,6 +1063,10 @@ npcPanel.onDepositAll = () => {
   connection?.send(buildWarehouseMoneyPacket(0, money));
 };
 npcPanel.onWithdrawAll = () => {
+  if (!connection?.connected) {
+    withdrawMoneyLocal();
+    return;
+  }
   if (warehouseMoney <= 0) {
     npcPanel.toast('仓库里没有金币', 'error');
     return;
@@ -1197,6 +1212,15 @@ inventoryPanel.onClick = (slot, mods) => {
    * 结果「想看一下词条」都变成卖出去了。现在统一走拖拽（见下面的 onDropPanel）。
    */
   if (npcPanel.isOpen) {
+    /*
+     * 离线演示：面板开着时单击背包物品 = 直接卖 / 直接存。
+     * 联机仍要求拖拽（原版口径：拖到商店窗口才是卖，单击只是看看词条）。
+     */
+    if (!connection?.connected) {
+      if (npcMode === 'shop') sellLocal(slot);
+      else if (npcMode === 'warehouse') storeLocal(slot);
+      return;
+    }
     inventoryPanel.toast(
       npcMode === 'shop' ? '拖到商店面板出售（按住左键拖过去）' : '拖到仓库面板存入（按住左键拖过去）'
     );
@@ -1848,6 +1872,18 @@ function syncWorldTags() {
    * 自己身上 —— 挨打时 `hitDemoTarget` 改 `hp`，这一帧血条就跟着变，
    * 和联机等 `0x15` 回包再更新的观感一致。
    */
+  for (const n of demoNpcs.values()) {
+    const npcZ = terrain.getHeight(n.x, n.y);
+    items.push({
+      id: n.id,
+      name: n.name,
+      x: n.x,
+      y: n.y,
+      z: npcZ + headHeightOf(n.actor, npcZ, 1.9) + 0.08,
+      kind: 'npc',
+    });
+  }
+
   for (const t of demoTargets.values()) {
     if (t.hp <= 0) continue;
     const groundZ = terrain.getHeight(t.x, t.y);
@@ -5732,6 +5768,30 @@ const demoTargets = new Map<number, DemoTarget>();
 let demoNextTargetId = 900001;
 
 /**
+ * 本地 NPC（离线演示）。
+ *
+ * 0.97 里 `Class >= 200` 的都是 NPC（商人 / 仓库管理员 / 卫兵 / 传送员…），
+ * 服务端把它们建在刷怪表里但**不给打**。这里也一样：刷到 NPC 只登记到这张表，
+ * 不进 `demoTargets`（所以既没有血条也点不出攻击），点它走对话。
+ */
+interface DemoNpc {
+  id: number;
+  actor: Actor;
+  cls: number;
+  name: string;
+  x: number;
+  y: number;
+}
+
+const demoNpcs = new Map<number, DemoNpc>();
+let demoNextNpcId = 800001;
+
+/** 这只怪是不是 NPC（0.97 约定：Class >= 200） */
+function isNpcClass(cls: number) {
+  return cls >= 200;
+}
+
+/**
  * 演示掉落的「本地地面物品」id 段。
  *
  * 服务端下发的物品 id 是 `m_Item` 下标（从 0 起），离线演示没有服务端，
@@ -5946,7 +6006,20 @@ async function spawnDemoMonsters(baseX: number, baseY: number) {
         // 服务端 Direct 是 0..7 的八方向，换算成弧度
         m.yaw = (sp.dir / 8) * Math.PI * 2;
         const def = table.get(sp.mob);
-        if (def) {
+        if (isNpcClass(sp.mob)) {
+          /*
+           * NPC：只登记、不给打。
+           * 服务端 `MonsterSetBase` 里 NPC 和怪混在一张表，靠 Class >= 200 区分。
+           */
+          demoNpcs.set(demoNextNpcId, {
+            id: demoNextNpcId++,
+            actor: m,
+            cls: sp.mob,
+            name: def?.name ?? `NPC ${sp.mob}`,
+            x: m.x,
+            y: m.y,
+          });
+        } else if (def) {
           demoMonsterDefs.set(m, def);
           // 注册成可攻击目标：血量取服务端 Monster.txt 的 MaxLife
           const maxHp = Math.max(1, def.maxHp);
@@ -6138,6 +6211,7 @@ function clearMonsters() {
   }
   monsters = [];
   demoTargets.clear();
+  demoNpcs.clear();
   for (const s of monsterShadows) {
     scene.remove(s.mesh);
     s.mesh.geometry.dispose();
@@ -7390,7 +7464,92 @@ const projTmp = new THREE.Vector3();
  */
 function pickMonsterAt(clientX: number, clientY: number): number | null {
   if (!world || !player) return null;
-  return remotes.pickAt(muCamera.camera, clientX, clientY, canvas.getBoundingClientRect(), 'monster');
+  const remote = remotes.pickAt(muCamera.camera, clientX, clientY, canvas.getBoundingClientRect(), 'monster');
+  // 离线演示的怪不在 remotes 里，再对本地模型补一次真射线
+  return remote ?? pickLocalActorAt(clientX, clientY, 'monster');
+}
+
+/**
+ * 屏幕坐标 → 本地怪 / NPC 的 id（离线演示）。
+ *
+ * `remotes.pickAt` 只能查服务端下发的实体。本地刷出来的怪和 NPC 走这条：
+ * 真射线打它们的网格（`Actor.meshes` 是蒙皮网格，`props` 是手上的武器/盾），
+ * 取最近的交点 —— 和联机那条同一套判定口径，不搞「投影点 70px 内算点中」
+ * 那种会吃掉旁边地面的大框。
+ */
+const localPickRay = new THREE.Raycaster();
+const localPickV = new THREE.Vector3();
+
+function pickLocalActorAt(
+  clientX: number,
+  clientY: number,
+  kind: 'monster' | 'npc'
+): number | null {
+  if (!world || !player) return null;
+  const rect = canvas.getBoundingClientRect();
+  if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) {
+    return null;
+  }
+
+  const entries: { id: number; actor: Actor }[] =
+    kind === 'npc'
+      ? [...demoNpcs.values()].map(n => ({ id: n.id, actor: n.actor }))
+      : [...demoTargets.values()].filter(t => t.hp > 0).map(t => ({ id: t.id, actor: t.actor }));
+  if (!entries.length) return null;
+
+  const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+  const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+  localPickRay.setFromCamera(new THREE.Vector2(ndcX, ndcY), muCamera.camera);
+  localPickRay.far = 60;
+
+  /*
+   * ① 真射线打网格。
+   *
+   * 注意 `Actor.attachMeshes(scene)` 是把蒙皮网格挂到 **scene** 上（骨骼在世界坐标里，
+   * 网格自身在原点），所以不能只打 `actor.root` —— 那里面是空的。这里直接对
+   * `actor.meshes` 求交，再反查属于谁。
+   */
+  const meshOwner = new Map<THREE.Object3D, number>();
+  for (const e of entries) for (const m of e.actor.meshes) meshOwner.set(m, e.id);
+  const meshes = [...meshOwner.keys()];
+  if (meshes.length) {
+    const hit = localPickRay.intersectObjects(meshes, false)[0];
+    if (hit) {
+      const id = meshOwner.get(hit.object);
+      if (id !== undefined) return id;
+    }
+  }
+
+  /*
+   * ② 投影包围盒兜底（脚 → 头顶 1.5 格）。
+   *
+   * 和联机 `remotes.hoverAt` 同一套口径：蒙皮网格的射线有时候擦边不中
+   * （骨骼动画的包围球没跟到当前帧），用屏幕上的「身体竖条」补一次。
+   */
+  let bestId: number | null = null;
+  let bestDist = Infinity;
+  for (const e of entries) {
+    const px = e.actor.wx;
+    const py = e.actor.wy;
+    const z = e.actor.z;
+    localPickV.set(px, py, z).project(muCamera.camera);
+    if (localPickV.z > 1) continue;
+    const fx = (localPickV.x * 0.5 + 0.5) * rect.width + rect.left;
+    const fy = (-localPickV.y * 0.5 + 0.5) * rect.height + rect.top;
+    localPickV.set(px, py, z + 1.5).project(muCamera.camera);
+    const hx = (localPickV.x * 0.5 + 0.5) * rect.width + rect.left;
+    const hy = (-localPickV.y * 0.5 + 0.5) * rect.height + rect.top;
+    const height = Math.max(8, Math.hypot(hx - fx, hy - fy));
+    const rx = height * 0.34;
+    if (Math.abs(clientX - (fx + hx) / 2) > rx) continue;
+    if (clientY < hy - height * 0.15 || clientY > fy + 4) continue;
+    const d = Math.hypot(clientX - fx, clientY - fy);
+    if (d < bestDist) {
+      bestDist = d;
+      bestId = e.id;
+    }
+  }
+  return bestId;
 }
 
 /**
@@ -8015,13 +8174,304 @@ function npcNameOf(id: number): string {
 function pickNpcAt(clientX: number, clientY: number): number | null {
   if (!world || !player) return null;
   // 同 `pickMonsterAt`：以前 60px 的「投影距离」会把 NPC 身边一大片地面吃掉
-  return remotes.pickAt(muCamera.camera, clientX, clientY, canvas.getBoundingClientRect(), 'npc');
+  return (
+    remotes.pickAt(muCamera.camera, clientX, clientY, canvas.getBoundingClientRect(), 'npc') ??
+    pickLocalActorAt(clientX, clientY, 'npc')
+  );
 }
 
 /** 和 NPC 说话：太远就先走过去（服务端静默丢弃，不纠错，容易以为「点了没反应」） */
+/* ------------------------------------------------------------------ */
+/* 离线演示：NPC 对话 / 商店 / 仓库                                     */
+/* ------------------------------------------------------------------ */
+
+/** 0.97 里开仓库的只有 Safety Guardian（240，`NpcTalk.cpp` case 240） */
+const NPC_CLASS_WAREHOUSE = 240;
+/** 混沌合成机（238）：本 port 没做合成，只给一句说明 */
+const NPC_CLASS_CHAOS = 238;
+
+/** 离线商店货架（`npcPanel` 直接读这份；id 段与服务端无关） */
+let localShopItems: InventoryItem[] = [];
+
+/** 演示仓库的存档键（刷新/重进还在，纯本地） */
+const LOCAL_WH_KEY = 'mu.demo.warehouse';
+let localWh: { items: InventoryItem[]; money: number } = (() => {
+  try {
+    const raw = localStorage.getItem(LOCAL_WH_KEY);
+    if (!raw) return { items: [], money: 0 };
+    const d = JSON.parse(raw) as { items?: InventoryItem[]; money?: number };
+    return { items: Array.isArray(d.items) ? d.items : [], money: Number(d.money) || 0 };
+  } catch {
+    return { items: [], money: 0 };
+  }
+})();
+
+function saveLocalWarehouse() {
+  try {
+    localStorage.setItem(LOCAL_WH_KEY, JSON.stringify(localWh));
+  } catch {
+    /* 隐私模式写不进去就算了，不影响本局 */
+  }
+}
+
+/** 药水 / 卷轴的固定价（`Item.txt` 里没有价，服务端 `ItemValue.txt` 也只覆盖了一小部分） */
+const POTION_PRICE: Record<number, number> = {
+  448: 15, // Apple
+  449: 60, // Small Healing
+  450: 120, // Medium Healing
+  451: 240, // Large Healing
+  452: 70, // Small Mana
+  453: 140, // Medium Mana
+  454: 280, // Large Mana
+  456: 90, // Antidote
+  457: 200, // Ale
+  458: 600, // Town Portal Scroll
+  459: 1500, // Box of Luck
+};
+
+/**
+ * 演示价（买价）。
+ *
+ * 服务端是 `CItem::Value`：先查 `ItemValue.txt`（本服只有 54 行，绝大多数物品没有），
+ * 再按 `(Value² × 10)/12` 算 —— 而 `Value` 列这张 `Item.txt` 里根本没有。
+ * 所以这里用「攻击/防御 + 需求等级」近似，量级对得上（短剑几百、传说之杖十万级），
+ * 演示买卖不缺钱也不至于一把破剑卖出天价。
+ */
+function demoBuyPrice(type: number, level = 0): number {
+  const a = itemAttr(type);
+  const group = Math.floor(type / 32);
+  let base = 0;
+  if (group === 14) {
+    // 药水/卷轴：固定价（服务端 `ItemValue.txt` 里也是死值，只是本服那张表只有 54 行）
+    base = POTION_PRICE[type] ?? 100;
+  } else if (group === 12 || group === 13) {
+    base = 800000; // 翅膀 / 守护：原版就是天价
+  } else if (a.slot >= 0) {
+    base = (a.dmgMax || 0) * 40 + (a.def || 0) * 60 + (a.reqLevel + 1) * (a.reqLevel + 1) * 12;
+  }
+  if (base <= 0) base = 500;
+  // 追加等级：服务端 `price *= (1 << level)`（药水那段），这里同样按 2^N
+  const mul = 1 << Math.max(0, Math.min(9, level));
+  return Math.max(10, Math.round((base * mul) / 10) * 10);
+}
+
+/** 卖价：服务端 `m_SellMoney = BuyMoney / 3`，再按位数取整 */
+function demoSellPrice(type: number, level = 0): number {
+  const buy = demoBuyPrice(type, level);
+  const sell = buy / 3;
+  const step = sell >= 1000 ? 100 : sell >= 100 ? 10 : 1;
+  return Math.max(1, Math.floor(sell / step) * step);
+}
+
+/** 点到本地 NPC：太远先走过去，到位再开窗（和联机 `talkToNpc` 同一套节拍） */
+function talkToLocalNpc(id: number) {
+  const npc = demoNpcs.get(id);
+  if (!npc || !player) return;
+  npcTargetId = id;
+  const d = Math.hypot(npc.x - player.x, npc.y - player.y);
+  if (d > NPC_TALK_RANGE) {
+    npcPendingId = id;
+    walkToCell(npc.x, npc.y);
+    return;
+  }
+  npcPendingId = -1;
+  movePath = [];
+  void openLocalNpcWindow(npc, id);
+}
+
+/** 按 NPC 职业决定开什么：仓库 240 / 商店（ShopManager）/ 其它＝一句话 */
+async function openLocalNpcWindow(npc: DemoNpc, id: number) {
+  npcTargetId = id;
+  if (npc.cls === NPC_CLASS_WAREHOUSE) {
+    openLocalWarehouse();
+    return;
+  }
+  const shop = await shopOf(npc.cls);
+  if (shop) {
+    openLocalShop(npc, shop);
+    return;
+  }
+  if (npc.cls === NPC_CLASS_CHAOS) {
+    chatBox.push('系统', `${npc.name}：合成功能演示服暂未开放。`, 1);
+    return;
+  }
+  chatBox.push('系统', localNpcLine(npc), 1);
+}
+
+/** NPC 的一句话（0.97 的对话文本在服务端，演示里给个像样的占位） */
+function localNpcLine(npc: DemoNpc): string {
+  const name = npc.name;
+  if (npc.cls === 235) return `${name}：愿女神保佑你，勇士。`;
+  if (npc.cls === 234) return `${name}：要换个服务器吗？去别的线路看看吧。`;
+  if (npc.cls === 236) return `${name}：把东西带来，我给你换点好东西。`;
+  if (npc.cls === 241) return `${name}：想组建战盟？先证明你的实力。`;
+  if (npc.cls === 247 || npc.cls === 249) return `${name}：站住！不要在市集里惹事。`;
+  return `${name}：你好，勇士。有什么需要吗？`;
+}
+
+/** 打开本地商店：把玩家看的那张货架铺进 `npcPanel` */
+function openLocalShop(npc: DemoNpc, shop: ShopDef) {
+  const shelf: InventoryItem[] = [];
+  for (const row of shop.items) {
+    const [type, level, dur, skill, luck, option, exc] = row;
+    const attr = itemAttr(type);
+    const slot = firstFreeGrid(shelf, 0, 8, 15, attr.w, attr.h);
+    if (slot === null) break;
+    shelf.push({
+      slot,
+      type,
+      level,
+      skill: !!skill,
+      luck: !!luck,
+      option,
+      durability: dur || attr.dura,
+      excellent: exc,
+    });
+  }
+  localShopItems = shelf;
+  npcMode = 'shop';
+  npcPanel.quickBuy = true; // 离线演示：单击就买（联机仍是拖拽）
+  npcPanel.show('shop');
+  // 商店开着时把背包也摆出来：卖东西要能点到背包格（手机上按 I 找面板太麻烦）
+  if (!inventoryPanel.isOpen) inventoryPanel.show();
+  npcPanel.setItems(shelf);
+  npcPanel.toast(`${shop.name} · 点物品买 / 点背包物品卖`, 'ok');
+  console.log(`[demo] 打开商店 ${shop.name}（${npc.name}，${shelf.length} 件）`);
+}
+
+/** 打开本地仓库（物品与金币存在 localStorage，切图/刷新还在） */
+function openLocalWarehouse() {
+  npcMode = 'warehouse';
+  npcPanel.quickBuy = true;
+  npcPanel.show('warehouse');
+  npcPanel.setItems(localWh.items);
+  if (!inventoryPanel.isOpen) inventoryPanel.show();
+  npcPanel.setWarehouseInfo({ money: localWh.money, tax: 0, locked: false });
+  npcPanel.toast('点仓库物品取出 · 点背包物品存入', 'ok');
+  console.log(`[demo] 打开仓库（${localWh.items.length} 件 / ${localWh.money} Zen）`);
+}
+
+/** 离线买：扣钱 → 塞背包（货架不变，原版也是无限量） */
+function buyLocal(shelfSlot: number) {
+  const shelved = localShopItems.find(i => i.slot === shelfSlot);
+  if (!shelved) return;
+  const price = demoBuyPrice(shelved.type, shelved.level);
+  const money = currentChar?.info?.money ?? 0;
+  if (money < price) {
+    npcPanel.toast(`金币不足（需要 ${price}）`, 'error');
+    return;
+  }
+  const slot = findDemoFreeSlot(shelved.type);
+  if (slot < 0) {
+    npcPanel.toast('背包已满', 'error');
+    return;
+  }
+  if (currentChar?.info) currentChar.info.money -= price;
+  addInventoryItem({ ...shelved, slot });
+  sfx(0x1d, { volume: 0.8 });
+  refreshHud();
+  npcPanel.toast(`买下 ${itemDisplayName(shelved.type)} -${price} Zen`, 'ok');
+  console.log(`[demo] 购买 ${itemDisplayName(shelved.type)}（type=${shelved.type}）-${price}`);
+}
+
+/** 离线卖：从背包拿走 → 加钱（服务端 `m_SellMoney = BuyMoney / 3`） */
+function sellLocal(slot: number) {
+  const item = inventoryItems.find(i => i.slot === slot);
+  if (!item) return;
+  if (item.slot < INVENTORY_WEAR_SIZE) {
+    npcPanel.toast('先脱下装备再卖', 'error');
+    return;
+  }
+  const price = demoSellPrice(item.type, item.level);
+  inventoryItems = inventoryItems.filter(i => i.slot !== slot);
+  if (currentChar?.info) currentChar.info.money += price;
+  syncInventoryViews();
+  refreshHud();
+  sfx(0x1f, { volume: 0.8 });
+  npcPanel.toast(`卖出 ${itemDisplayName(item.type)} +${price} Zen`, 'ok');
+  console.log(`[demo] 出售 ${itemDisplayName(item.type)}（type=${item.type}）+${price}`);
+}
+
+/** 离线存仓 */
+function storeLocal(slot: number) {
+  const item = inventoryItems.find(i => i.slot === slot);
+  if (!item) return;
+  if (item.slot < INVENTORY_WEAR_SIZE) {
+    npcPanel.toast('先脱下装备再存仓', 'error');
+    return;
+  }
+  const attr = itemAttr(item.type);
+  const dest = firstFreeGrid(localWh.items, 0, 8, 15, attr.w, attr.h);
+  if (dest === null) {
+    npcPanel.toast('仓库满了', 'error');
+    return;
+  }
+  localWh.items = localWh.items.concat({ ...item, slot: dest });
+  inventoryItems = inventoryItems.filter(i => i.slot !== slot);
+  saveLocalWarehouse();
+  syncInventoryViews();
+  refreshHud();
+  npcPanel.setItems(localWh.items);
+  npcPanel.toast('已存入仓库', 'ok');
+}
+
+/** 离线取仓 */
+function takeLocal(whSlot: number) {
+  const item = localWh.items.find(i => i.slot === whSlot);
+  if (!item) return;
+  const attr = itemAttr(item.type);
+  const dest = firstFreeGrid(inventoryItems, INVENTORY_WEAR_SIZE, 8, 8, attr.w, attr.h);
+  if (dest === null) {
+    npcPanel.toast('背包满了', 'error');
+    return;
+  }
+  localWh.items = localWh.items.filter(i => i.slot !== whSlot);
+  saveLocalWarehouse();
+  addInventoryItem({ ...item, slot: dest });
+  npcPanel.setItems(localWh.items);
+  npcPanel.toast('已从仓库取出', 'ok');
+}
+
+/** 离线存钱 / 取钱（演示没有服务端税，直接搬） */
+function depositMoneyLocal() {
+  const money = currentChar?.info?.money ?? 0;
+  if (money <= 0) {
+    npcPanel.toast('身上没有金币', 'error');
+    return;
+  }
+  if (currentChar?.info) currentChar.info.money = 0;
+  localWh.money += money;
+  saveLocalWarehouse();
+  refreshHud();
+  npcPanel.setWarehouseInfo({ money: localWh.money, tax: 0, locked: false });
+  npcPanel.toast(`存入 ${money} Zen`, 'ok');
+}
+
+function withdrawMoneyLocal() {
+  if (localWh.money <= 0) {
+    npcPanel.toast('仓库里没有金币', 'error');
+    return;
+  }
+  const money = localWh.money;
+  localWh.money = 0;
+  if (currentChar?.info) currentChar.info.money += money;
+  saveLocalWarehouse();
+  refreshHud();
+  npcPanel.setWarehouseInfo({ money: localWh.money, tax: 0, locked: false });
+  npcPanel.toast(`取出 ${money} Zen`, 'ok');
+}
+
 function talkToNpc(id: number) {
+  /*
+   * 离线演示：NPC 是本地刷出来的（`demoNpcs`），没有服务端可发 0x1F，
+   * 走本地那套「商店 / 仓库 / 对话」。
+   */
+  if (!connection?.connected) {
+    talkToLocalNpc(id);
+    return;
+  }
   const npc = remotes.get(id);
-  if (!npc || !player || !connection?.connected) return;
+  if (!npc || !player) return;
 
   const d = Math.hypot(npc.tx - player.x, npc.ty - player.y);
   npcTargetId = id;
@@ -8170,7 +8620,20 @@ function queueNpcGreeting(id: number) {
 
 /** 主循环：走到位就开口（和 updatePickup 一个套路） */
 function updateNpcTalk() {
-  if (npcPendingId < 0 || !player || !connection?.connected) return;
+  if (npcPendingId < 0 || !player) return;
+  if (!connection?.connected) {
+    const ln = demoNpcs.get(npcPendingId);
+    if (!ln) {
+      npcPendingId = -1;
+      return;
+    }
+    if (Math.hypot(ln.x - player.x, ln.y - player.y) > NPC_TALK_RANGE) return;
+    const id = npcPendingId;
+    npcPendingId = -1;
+    movePath = [];
+    void openLocalNpcWindow(ln, id);
+    return;
+  }
   const npc = remotes.get(npcPendingId);
   if (!npc) {
     npcPendingId = -1;
@@ -8213,6 +8676,7 @@ function onNpcTalkReply(pkt: Uint8Array) {
 
   if (reply.result === NPC_TALK.SHOP) {
     npcMode = 'shop';
+    npcPanel.quickBuy = false;
     npcPanel.show('shop');
     npcPanel.toast('点击物品购买 · 点背包物品出售', 'ok');
     return;
@@ -8220,6 +8684,7 @@ function onNpcTalkReply(pkt: Uint8Array) {
 
   if (reply.result === NPC_TALK.WAREHOUSE) {
     npcMode = 'warehouse';
+    npcPanel.quickBuy = false;
     npcPanel.show('warehouse');
     npcPanel.setWarehouseInfo({
       money: warehouseMoney,
@@ -8339,7 +8804,11 @@ function onContainerList(pkt: Uint8Array) {
 
 /** 买：0x32 + 货架格号。成功与否都只看 0x32 回执的 result */
 function buyFromShop(shelfSlot: number) {
-  if (!connection?.connected) return;
+  // 离线演示：本地扣钱入包（服务端那套是 0x32 + 回执）
+  if (!connection?.connected) {
+    buyLocal(shelfSlot);
+    return;
+  }
   const money = currentChar?.info?.money ?? 0;
   connection.send(buildBuyPacket(shelfSlot));
   console.log(`[shop] 购买货架格 ${shelfSlot}（身上 ${money}）`);
@@ -8347,7 +8816,10 @@ function buyFromShop(shelfSlot: number) {
 
 /** 卖：0x33 + 背包槽位。点背包物品触发 */
 function sellToShop(slot: number) {
-  if (!connection?.connected) return;
+  if (!connection?.connected) {
+    sellLocal(slot);
+    return;
+  }
   const item = inventoryItems.find(i => i.slot === slot);
   if (!item) return;
   pendingSellSlot = slot;
@@ -8416,7 +8888,10 @@ function firstFreeGrid(
 
 /** 存进仓库：0x24，SourceFlag=0 → TargetFlag=2（目标格自己算，见 firstFreeGrid） */
 function storeToWarehouse(slot: number) {
-  if (!connection?.connected) return;
+  if (!connection?.connected) {
+    storeLocal(slot);
+    return;
+  }
   const item = inventoryItems.find(i => i.slot === slot);
   if (!item) return;
   if (item.slot < INVENTORY_WEAR_SIZE) {
@@ -8437,7 +8912,10 @@ function storeToWarehouse(slot: number) {
 
 /** 从仓库取出：0x24，SourceFlag=2 → TargetFlag=0（背包落点自己算） */
 function takeFromWarehouse(warehouseSlot: number) {
-  if (!connection?.connected) return;
+  if (!connection?.connected) {
+    takeLocal(warehouseSlot);
+    return;
+  }
   const item = npcPanelItem(warehouseSlot);
   if (!item) {
     console.warn(`[warehouse] take(${warehouseSlot}) 面板里没这件，面板现有格=${npcPanel.snapshot().items.map(i => i.slot).join(',') || '空'}`);
@@ -10470,17 +10948,25 @@ function frame() {
      * 同时吃 ESC 菜单里那个「自动攻击 On/Off」（原版 `m_bAutoAttack`）。
      */
     if (autoAttackId >= 0) {
-      const t = remotes.get(autoAttackId);
-      if (!t || t.dying || playerDead || !escMenu.autoAttack) {
+      /*
+       * 两条线：联机看 `remotes`，离线看 `demoTargets`。
+       * 以前只查 remotes，演示里点了怪「打一下就不动了」就是这个原因。
+       */
+      const rt = remotes.get(autoAttackId);
+      const lt = rt ? null : demoTargets.get(autoAttackId);
+      const alive = rt ? !rt.dying : !!lt && lt.hp > 0;
+      if (!alive || playerDead || !escMenu.autoAttack) {
         // 目标没了 / 自己死了 / 选项里关掉了 → 取消锁定
         autoAttackId = -1;
       } else {
-        const d = Math.hypot(t.tx - player.x, t.ty - player.y);
+        const tx = rt ? rt.tx : lt!.x;
+        const ty = rt ? rt.ty : lt!.y;
+        const d = Math.hypot(tx - player.x, ty - player.y);
         if (d <= ATTACK_RANGE) {
-          if (attackCd <= 0 && !isAttacking()) tryAttack(t.id);
+          if (attackCd <= 0 && !isAttacking()) tryAttack(autoAttackId);
         } else if (movePath.length === 0 && performance.now() - lastRepathAt > 400) {
           // 怪物在跑：没路径了就重算一次，别每帧都算 A*
-          walkToCell(t.tx, t.ty);
+          walkToCell(tx, ty);
           lastRepathAt = performance.now();
         }
       }
@@ -10491,17 +10977,22 @@ function frame() {
 
     // 点了远处的怪物：走过去，进 3 格自动出手
     if (pendingTargetId >= 0) {
-      const t = remotes.get(pendingTargetId);
-      if (!t || t.dying) {
+      const rt = remotes.get(pendingTargetId);
+      const lt = rt ? null : demoTargets.get(pendingTargetId);
+      const alive = rt ? !rt.dying : !!lt && lt.hp > 0;
+      if (!alive) {
         pendingTargetId = -1;
       } else {
-        const d = Math.hypot(t.tx - player.x, t.ty - player.y);
+        const tx = rt ? rt.tx : lt!.x;
+        const ty = rt ? rt.ty : lt!.y;
+        const d = Math.hypot(tx - player.x, ty - player.y);
         if (d <= ATTACK_RANGE) {
+          const id = pendingTargetId;
           pendingTargetId = -1;
-          tryAttack(t.id);
+          tryAttack(id);
         } else if (movePath.length === 0 && performance.now() - lastRepathAt > 400) {
           // 追击：没路径了就重算一次（怪物在动，别每帧都算 A*）
-          walkToCell(t.tx, t.ty);
+          walkToCell(tx, ty);
           lastRepathAt = performance.now();
         }
       }
@@ -10829,11 +11320,48 @@ function boot() {
     },
     /** 传 NPC 的职业号说话（探针找商人用，不用记 id） */
     talkClass: (cls: number) => {
-      const npc = remotes.list().find(e => e.kind === 'npc' && e.cls === cls);
-      if (!npc) return null;
-      talkToNpc(npc.id);
-      return npc.id;
+      const remote = remotes.list().find(e => e.kind === 'npc' && e.cls === cls);
+      if (remote) {
+        talkToNpc(remote.id);
+        return remote.id;
+      }
+      const local = [...demoNpcs.values()].find(n => n.cls === cls);
+      if (!local) return null;
+      talkToNpc(local.id);
+      return local.id;
     },
+    /** 离线演示：本地 NPC 列表 */
+    demoNpcs: () =>
+      [...demoNpcs.values()].map(n => ({
+        id: n.id,
+        cls: n.cls,
+        name: n.name,
+        x: +n.x.toFixed(1),
+        y: +n.y.toFixed(1),
+        dist: player ? +Math.hypot(n.x - player.x, n.y - player.y).toFixed(2) : -1,
+      })),
+    /** 离线演示：当前打开的货架（含演示价） */
+    demoShop: () =>
+      localShopItems.map(i => ({
+        slot: i.slot,
+        type: i.type,
+        name: itemAttr(i.type).name,
+        level: i.level,
+        price: demoBuyPrice(i.type, i.level),
+      })),
+    /** 离线演示：本地仓库（物品 + 金币） */
+    demoWarehouse: () => ({
+      money: localWh.money,
+      items: localWh.items.map(i => ({
+        slot: i.slot,
+        type: i.type,
+        name: itemAttr(i.type).name,
+        level: i.level,
+      })),
+    }),
+    /** 屏幕坐标 → 本地怪 / NPC 的 id（探针验点击命中） */
+    pickLocal: (x: number, y: number, kind: 'monster' | 'npc') =>
+      pickLocalActorAt(x, y, kind),
     /** 当前 NPC 面板（商店/仓库）内容 */
     npcPanel: () => npcPanel.snapshot(),
     /** 直接买货架格（等价于点那格） */

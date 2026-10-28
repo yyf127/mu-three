@@ -55,12 +55,23 @@ export interface SkillDef {
 /** `Item.txt` 的掉落相关三列：type = group*32 + index、物品等级、是否可掉 */
 export type ItemDropRow = [type: number, level: number, drop: number];
 
+/** 货架上一件商品：`[type, level, durability, skill, luck, option, excellent]` */
+export type ShopItemRow = [number, number, number, number, number, number, number];
+
+export interface ShopDef {
+  /** 商店名（`Shop/NNN - 名字.txt` 的名字部分） */
+  name: string;
+  items: ShopItemRow[];
+}
+
 interface GameConfigFile {
   meta: { builtAt: string; source: string; counts: Record<string, number> };
   monsters: Record<string, MonsterDef>;
   spawns: Record<string, SpawnDef[]>;
   skills: SkillDef[];
   items?: ItemDropRow[];
+  /** NPC 职业 → 商店（`ShopManager.txt` + `Shop/*.txt`） */
+  shops?: Record<string, ShopDef>;
 }
 
 export interface GameConfigStatus {
@@ -161,6 +172,17 @@ export async function dropPool(monsterLevel: number): Promise<number[]> {
   }
   dropPoolCache.set(monsterLevel, pool);
   return pool;
+}
+
+/**
+ * 某类 NPC 开的商店（没有商店返回 null）。
+ *
+ * 服务端 `CShopManager::GetShopNumber(MonsterClass)` 的等价物：
+ * 职业号查 `ShopManager.txt`，货架在 `Shop/NNN - 名字.txt`。
+ */
+export async function shopOf(npcClass: number): Promise<ShopDef | null> {
+  const cfg = await loadGameConfig();
+  return cfg?.shops?.[String(npcClass)] ?? null;
 }
 
 /** 技能表（45 条），后续战斗/技能面板用 */

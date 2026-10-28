@@ -4629,3 +4629,95 @@ if (rand % max(1, ItemRate) < ItemDropRate) { 掉 }
 | 击杀掉落 | `Golden Archer` → 掉 1 件（`type=448` 苹果 / 或 `234` 毒斧）@ 脚下 |
 | 拾取 | 地面归零、背包 `[{slot:12, type:448, level:0}]` |
 | `demo-probe`（本地 serve:gh） | 28/28 |
+
+
+# 阶段 CQ：离线演示能点怪打、点 NPC 说话、开商店 / 仓库
+
+## 一、为什么点不动
+
+| 现象 | 根因 |
+|---|---|
+| 点怪不攻击 | `pickMonsterAt` 只查 `remotes`（服务端实体），本地刷的怪不在里面 → 射线永远落空，点击落到「走位」分支 |
+| 点 NPC 没反应 | `talkToNpc` 第一句 `if (!connection?.connected) return` —— 离线直接退出 |
+| 商店/仓库打不开 | 商店列表靠服务端 `0x30`(result=0) + `0x31` 下发，离线没有任何数据源 |
+| 背包点不动 | `inventoryPanel.onClick` 定义了但**从来没有被调用**（背包格子只绑了 `pointerdown`，拖拽里的单击又 early-return 交给「面板自己的 click 逻辑」，而那个逻辑不存在） |
+
+## 二、点怪：本地模型射线 + 投影兜底
+
+`pickLocalActorAt(x, y, kind)`（`main.ts`）：
+
+1. 真射线打 `actor.meshes`（`attachMeshes(scene)` 是把蒙皮网格挂到 **scene** 上，
+   打 `actor.root` 里面是空的 —— 这一点踩过）；
+2. 打不中再走投影包围盒（脚 → 头顶 1.5 格），口径和联机 `remotes.hoverAt` 一致。
+
+`pickMonsterAt` / `pickNpcAt` 都是「先联机、再本地」。点击后仍走原来的
+`tryAttack(id)` / `talkToNpc(id)`，没有另开一条路径。
+
+顺带修了自动攻击：`autoAttackId` / `pendingTargetId` 只查 `remotes`，
+所以演示里「打一下就站住」。现在两条线都认本地怪。
+
+## 三、NPC：Class >= 200 是 NPC，不给打
+
+服务端 `MonsterSetBase.txt` 里 NPC 和怪混在一张表，靠 Class 区分（`CGameObjectManager::SetNpc`）。
+刷怪时 `isNpcClass(mob)` → 只登记进 `demoNpcs`，**不进 `demoTargets`**：
+
+- 没有血条、点不出攻击；
+- 名牌照画（`kind: 'npc'`）；
+- 点它 → `talkToLocalNpc` → 太远先走过去，到位再开窗。
+
+按职业分流（`NpcTalk.cpp` 的 switch）：
+
+| 职业 | 行为 |
+|---|---|
+| 240 Safety Guardian | 仓库 |
+| 238 Chaos Goblin | 聊天框一句「演示服暂未开放」 |
+| `ShopManager.txt` 里有的（洛兰：251 铁匠 / 255 酒吧女 / 254 法师 / 248 商人 / 250 货郎…） | 商店 |
+| 其它（卫兵 247/249、圣导士 235、传送 234…） | 聊天框一句台词 |
+
+## 四、商店：服务端货架原样搬过来
+
+`build-game-config.mjs` 新增 `parseShops()`：
+
+```
+ShopManager.txt:  0 <tab> 251        → NPC 职业 → 商店号
+Shop/000 - *.txt: 14,001 <tab> 0 <tab> 255 …  → [type, level, dur, skill, luck, opt, exc]
+```
+
+输出 `shops: { "251": { name, items: [...] } }`（14 家店 / 98 件商品，`game.json` 只 +3KB）。
+打开时用 `firstFreeGrid` 按 8×15 铺进 `npcPanel` 的货架。
+
+价格：本服 `ItemValue.txt` 只有 54 行（弓/箭/宝石那几样），`Item.txt` 又没有 `Value` 列，
+所以用 `攻击 + 防御 + 需求等级` 近似（药水走固定价表），卖价 = 买价 / 3（服务端
+`m_SellMoney = BuyMoney / 3`）。
+
+## 五、仓库：存 localStorage
+
+演示没有角色存档，仓库放在 `localStorage['mu.demo.warehouse']`（物品 + 金币），
+切图/刷新都还在。存/取复用 `firstFreeGrid`（仓库 8×15、背包 8×8），
+存钱/取钱直接搬（演示没有服务端税，面板显示 tax 0）。
+
+## 六、交互：离线单击即成交
+
+原版买卖/存取都是**拖拽**（拖到商店窗口才是卖）。手机上拖拽难操作，所以离线模式：
+
+| 操作 | 联机 | 离线演示 |
+|---|---|---|
+| 点货架商品 | 只提示「拖到背包」 | **直接买下**（`npcPanel.quickBuy`） |
+| 点仓库物品 | 只提示「拖到背包」 | **直接取出** |
+| 点背包物品（面板开着） | 只提示「拖过去」 | **直接卖出 / 直接存入** |
+
+同时补了 `inventoryPanel` 的 `click` 事件（`onClick` 以前是死代码）。
+打开商店/仓库会顺手把背包面板摆出来，手机用户不用再按 I 找。
+
+## 七、验证（本地 serve:gh，真点击 + 真走位）
+
+| 检查 | 结果 |
+|---|---|
+| 点怪（屏幕投影点，CDP 真 pointer） | `clickLog: → monster#900007 攻击` → 自动追杀 → 死亡掉落 |
+| 点 Hanzo（251） | `npcPanel open=true mode=shop`，7 件商品 |
+| 点商品图标 | 钱 `1234567 → 1234507`（-60），背包 `slot12 type449` |
+| 点背包物品（商店开着） | 卖出 +20（=60/3），背包清空 |
+| 点 Safety Guardian（240） | `mode=warehouse`，背包/仓库并排显示 |
+| 点背包物品（仓库开着） | 仓库 `[{slot:0,type:449}]`，背包少一件 |
+| 点仓库物品 | 仓库清空，背包 `slot12` 回来 |
+| `demo-probe` | 28/28 |

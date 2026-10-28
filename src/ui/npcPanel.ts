@@ -174,6 +174,14 @@ export class NpcPanel {
   private ready: Promise<void>;
 
   onBuy: ((slot: number) => void) | null = null;
+  /**
+   * 单击就买 / 单击就取（离线演示专用）。
+   *
+   * 原版（以及联机模式）是**拖拽**：把商品从商店拖到背包才成交。
+   * 演示没有服务端、手机上拖拽也不好操作，所以离线时打开这个开关，
+   * 单击商品 = 买下、单击仓库物品 = 取出。联机路径保持原样（`false`）。
+   */
+  quickBuy = false;
   onTakeOut: ((slot: number) => void) | null = null;
   /**
    * 把货架 / 仓库格子里的东西**拖到背包面板**上。
@@ -487,6 +495,12 @@ export class NpcPanel {
     if (!this.open) return;
     const item = this.itemAtCell(cellIndex);
     if (!item) return;
+    // 离线演示：单击即成交（联机仍走拖拽）
+    if (this.quickBuy) {
+      if (this.mode === 'shop') this.onBuy?.(item.slot);
+      else this.onTakeOut?.(item.slot);
+      return;
+    }
     this.toast(
       this.mode === 'shop' ? '拖到背包面板购买（按住左键拖过去）' : '拖到背包面板取回（按住左键拖过去）',
       ''
