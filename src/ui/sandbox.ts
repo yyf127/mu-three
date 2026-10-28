@@ -63,6 +63,19 @@ export class SandboxPanel {
   /** 点了 Cast：把选中的技能抛给 main.ts（那里才知道目标是谁） */
   onCast: (skill: SkillEntry) => void = () => {};
 
+  /**
+   * 用户是否主动展开面板（跨会话记忆）。
+   *
+   * 手机上这堆下拉框会挡掉半个屏幕，所以默认**收起**；点右下角那个小按钮才展开。
+   * 注意它和 `show()` 不是一回事：`show()` 是「此刻能不能显示」（进图 / 离线沙盘 /
+   * 读条中），这里记的是「用户想不想看」。
+   */
+  private userOpen = false;
+  /** 展开/收起按钮（挂在 stage 上，不在 `this.root` 里 —— 面板隐藏时按钮要留着） */
+  private toggleBtn: HTMLButtonElement;
+  /** 此刻是否允许显示（离线沙盘 && 已进图 && 不在读条） */
+  private available = false;
+
   constructor(stage: HTMLElement) {
     this.root = document.createElement('div');
     this.root.id = 'sandbox';
@@ -74,8 +87,51 @@ export class SandboxPanel {
 
     this.root.append(this.buildClassCard(), this.buildEquipCard(), this.buildSkillCard());
     stage.appendChild(this.root);
+
+    this.toggleBtn = document.createElement('button');
+    this.toggleBtn.type = 'button';
+    this.toggleBtn.id = 'sandbox-toggle';
+    this.toggleBtn.className = 'sb-toggle hidden';
+    this.userOpen = localStorage.getItem('mu.sandboxOpen') === '1';
+    this.paintToggle();
+    this.toggleBtn.addEventListener('click', e => {
+      // 别把点击漏给 3D 画面（否则点一下就走位）
+      e.stopPropagation();
+      this.toggleUser();
+    });
+    for (const type of ['pointerdown', 'mousedown', 'wheel'] as const) {
+      this.toggleBtn.addEventListener(type, e => e.stopPropagation());
+    }
+    stage.appendChild(this.toggleBtn);
+
     this.installDrag(stage);
     this.restorePos();
+  }
+
+  /* ---------------- 展开 / 收起 ---------------- */
+
+  /**
+   * 用户点了按钮（或按 P）。
+   *
+   * 记到 `localStorage`，下次进来还是这个样子；手机用户不爱每次点。
+   */
+  toggleUser() {
+    this.userOpen = !this.userOpen;
+    localStorage.setItem('mu.sandboxOpen', this.userOpen ? '1' : '0');
+    this.paintToggle();
+    this.show(this.available && this.userOpen);
+  }
+
+  /** 「此刻能不能显示」：离线沙盘 && hud 可见 && 不在读条。由 `showScreens` 调用 */
+  setAvailable(on: boolean) {
+    this.available = on;
+    this.toggleBtn.classList.toggle('hidden', !on);
+    if (!on) this.show(false);
+  }
+
+  private paintToggle() {
+    this.toggleBtn.textContent = this.userOpen ? '收起面板' : '演示面板';
+    this.toggleBtn.classList.toggle('on', this.userOpen);
   }
 
   /* ---------------- 拖动 ----------------
@@ -395,6 +451,11 @@ export class SandboxPanel {
 
   get visible() {
     return !this.root.classList.contains('hidden');
+  }
+
+  /** 用户想不想看（跟「此刻能不能显示」无关，见 `setAvailable`） */
+  get userOpened() {
+    return this.userOpen;
   }
 
   state(): SandboxState {

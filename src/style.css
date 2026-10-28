@@ -215,22 +215,6 @@ canvas {
   color: var(--gold);
 }
 
-.hud-bottom-right {
-  position: absolute;
-  right: 22px;
-  bottom: 20px;
-  text-align: right;
-  font-size: 11px;
-  line-height: 1.9;
-  color: #7f7666;
-  letter-spacing: 1px;
-}
-
-.hud-bottom-right b {
-  color: var(--gold);
-  font-weight: 600;
-}
-
 /* ---------------- 底栏数值（HP/MP 球 / 经验 / AG / 角色名 / 坐标） ---------------- */
 /*
  * 坐标全部照抄 0.97 客户端（见 src/ui/hudValues.ts 头注释），
@@ -1542,6 +1526,45 @@ button.small {
   /* 拖动时不要跟过渡动画打架 */
   transition: none;
   opacity: 1;
+}
+
+/*
+ * 「演示面板」展开/收起按钮。
+ *
+ * 手机上面板会盖掉半个屏幕，所以默认收起；按钮固定在右下角（原操作提示的位置，
+ * 底栏上方），金色描边 + 微光，够显眼但只有 70×24。
+ */
+.sb-toggle {
+  position: absolute;
+  right: 16px;
+  bottom: 96px;
+  z-index: 26;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #ffe6a6;
+  background: linear-gradient(#3a2d18, #1b1408);
+  border: 1px solid #8a6a2f;
+  border-radius: 4px;
+  cursor: pointer;
+  box-shadow: 0 0 8px rgba(255, 200, 80, 0.25);
+  text-shadow: 0 1px 0 #000;
+}
+
+.sb-toggle:hover {
+  border-color: #d8b45a;
+  color: #fff3cc;
+}
+
+.sb-toggle.on {
+  color: #ffd76a;
+  border-color: #f0c24a;
+  box-shadow: 0 0 12px rgba(255, 200, 80, 0.55);
+}
+
+.sb-toggle.hidden {
+  display: none;
 }
 
 #sandbox.hidden {

@@ -535,8 +535,13 @@ function showScreens({ login = false, charselect = false, loading = false, hud =
   charScreen.classList.toggle('hidden', !charselect);
   loadingEl.classList.toggle('hidden', !loading);
   hudEl.classList.toggle('hidden', !hud);
-  // 沙盘只在「离线演示且已经进图」时露出来：登录/选角/读条时都要收起来
-  sandboxPanel.show(sandbox.on && hud && !loading);
+  /*
+   * 沙盘面板：`setAvailable` 管「此刻能不能显示」（离线演示 + 已进图 + 不在读条），
+   * `show` 再叠一层用户意愿 —— 手机上默认收起，点右下角「演示面板」才展开。
+   */
+  const sandboxReady = sandbox.on && hud && !loading;
+  sandboxPanel.setAvailable(sandboxReady);
+  sandboxPanel.show(sandboxReady && sandboxPanel.userOpened);
   // 原版 UI 层只在游戏内出现
   if (uiLayer) uiLayer.show(hud);
   /*
@@ -9636,10 +9641,10 @@ window.addEventListener('keydown', e => {
     toggleCharacter();
     return;
   }
-  // P = 收起/展开离线演示沙盘（原版没有这个键，纯调试用）
+  // P = 收起/展开离线演示沙盘（原版没有这个键，纯调试用；和右下角按钮同一条路径）
   if (!typing && e.code === 'KeyP' && sandbox.on) {
     e.preventDefault();
-    sandboxPanel.show(!sandboxPanel.visible);
+    sandboxPanel.toggleUser();
     return;
   }
   // 原版 V 和 I 都开背包（Player_InputTick.cpp:475-476）
@@ -9823,10 +9828,14 @@ function frame() {
     camForward.copy(muCamera.getForward());
     camRight.copy(muCamera.getRight());
 
-    if (keys.has('KeyW') || keys.has('ArrowUp')) moveDir.add(camForward);
-    if (keys.has('KeyS') || keys.has('ArrowDown')) moveDir.sub(camForward);
-    if (keys.has('KeyD') || keys.has('ArrowRight')) moveDir.add(camRight);
-    if (keys.has('KeyA') || keys.has('ArrowLeft')) moveDir.sub(camRight);
+    /*
+     * 只留方向键：WASD 已按用户要求取消（W 现在是快捷栏 2，A/D 会和移动打架，
+     * 手机上也没有键盘）。走位统一交给「左键点地板」。
+     */
+    if (keys.has('ArrowUp')) moveDir.add(camForward);
+    if (keys.has('ArrowDown')) moveDir.sub(camForward);
+    if (keys.has('ArrowRight')) moveDir.add(camRight);
+    if (keys.has('ArrowLeft')) moveDir.sub(camRight);
 
     if (moveDir.lengthSq() > 0) {
       // 键盘操作优先，打断寻路
