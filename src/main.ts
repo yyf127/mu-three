@@ -5746,30 +5746,48 @@ async function spawnDemoMonsters(baseX: number, baseY: number) {
 
   let spawned = 0;
   let withDef = 0;
+
+  /*
+   * 怪物模型**并发**加载（6 路）。
+   *
+   * 每只怪物是 1 个 BMD + 若干贴图，串行加载在线上要 4-5 秒一只（实测 17.5s 才出 3 只）；
+   * 这里按 6 路并发，先出来的就先站到场上 —— 玩家进图两秒就能看到怪。
+   */
+  const jobs: (() => Promise<void>)[] = [];
   for (const { sp } of near) {
     const r = Math.max(0, sp.range);
     // 固定点刷 1 只；范围点按半径刷一群
     const count = r > 0 ? Math.min(3, Math.max(1, Math.round(r / 10))) : 1;
-    for (let k = 0; k < count && spawned < MAX; k++) {
-      const created = await createCreatureByClass(scene, { monster: MONSTER_DIR, npc: NPC_DIR }, sp.mob);
-      if (!created) break;
-      const m = created.actor;
-      m.x = sp.x + (r ? (Math.random() * 2 - 1) * r : 0);
-      m.y = sp.y + (r ? (Math.random() * 2 - 1) * r : 0);
-      m.z = world ? world.terrain.getHeight(m.x, m.y) : 0;
-      // 服务端 Direct 是 0..7 的八方向，换算成弧度
-      m.yaw = (sp.dir / 8) * Math.PI * 2;
-      const def = table.get(sp.mob);
-      if (def) {
-        demoMonsterDefs.set(m, def);
-        withDef++;
-      }
-      monsters.push(m);
-      if (playerShadow) addMonsterShadow(m);
-      spawned++;
+    for (let k = 0; k < count; k++) {
+      jobs.push(async () => {
+        if (spawned >= MAX) return;
+        const created = await createCreatureByClass(scene, { monster: MONSTER_DIR, npc: NPC_DIR }, sp.mob);
+        if (!created) return;
+        const m = created.actor;
+        m.x = sp.x + (r ? (Math.random() * 2 - 1) * r : 0);
+        m.y = sp.y + (r ? (Math.random() * 2 - 1) * r : 0);
+        m.z = world ? world.terrain.getHeight(m.x, m.y) : 0;
+        // 服务端 Direct 是 0..7 的八方向，换算成弧度
+        m.yaw = (sp.dir / 8) * Math.PI * 2;
+        const def = table.get(sp.mob);
+        if (def) {
+          demoMonsterDefs.set(m, def);
+          withDef++;
+        }
+        monsters.push(m);
+        if (playerShadow) addMonsterShadow(m);
+        spawned++;
+      });
     }
-    if (spawned >= MAX) break;
   }
+
+  const LANES = 6;
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: LANES }, async () => {
+      while (cursor < jobs.length && spawned < MAX) await jobs[cursor++]();
+    })
+  );
 
   console.log(
     `[demo] 刷怪表 ${spawns.length} 点，视野内 ${spawned} 只（带属性 ${withDef}）` +
