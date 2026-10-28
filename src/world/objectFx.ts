@@ -130,6 +130,15 @@ export class ObjectFxLayer {
     void this.build();
   }
 
+  /**
+   * 地面光斑（`AddTerrainLight` 的那张朝上加色圆盘）。
+   *
+   * 原版是给地形顶点加亮，我们用一张大圆盘近似 —— 但洛兰这种密集摆件的地图，
+   * 十几个 6 米圆盘叠在一起会糊成一大片"黄圈"，用户要求去掉。
+   * 火焰/烟保留（那是物件本体的一部分），只关掉地面这层。
+   */
+  private static readonly GROUND_GLOW = false;
+
   private async build() {
     const [fireTex, flameTex, smokeTex] = await Promise.all([
       fxTexture('Fire01.OZJ'),
@@ -139,6 +148,9 @@ export class ObjectFxLayer {
 
     for (const s of this.spots) {
       const objs: THREE.Object3D[] = [];
+
+      // 地面光斑整层跳过（见 GROUND_GLOW）；火焰/烟照旧
+      if (s.kind === 'glow' && !ObjectFxLayer.GROUND_GLOW) continue;
 
       if (s.kind === 'fire') {
         // 三层：大底焰（静态）+ 两层序列帧火舌（错相位）

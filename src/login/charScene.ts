@@ -247,6 +247,18 @@ export async function createCharScene(host: HTMLElement): Promise<CharSceneHandl
     y: slot * CHAR_STEP_Y - CHAR_STEP_Y,
   });
 
+  /**
+   * 每个槽位的**站位锚点**（世界坐标）。
+   *
+   * 名字标签只依赖它，不依赖模型 —— 于是「站位 + 头顶名字」可以先出来，
+   * 角色模型在后台并发加载，选角界面不用等模型就能点。
+   */
+  const anchors: { wx: number; wy: number; z: number }[] = [];
+  const anchorOf = (slot: number) => {
+    const w = slotWorld(slot);
+    return { wx: w.x, wy: w.y, z: STAGE_Z };
+  };
+
   const placeChar = (actor: Actor, slot: number) => {
     const w = slotWorld(slot);
     actor.x = w.x / 1 - 0.5; // 世界坐标 → 格号（格宽 = 1 世界单位）
@@ -355,6 +367,7 @@ export async function createCharScene(host: HTMLElement): Promise<CharSceneHandl
       for (const p of a.props) p.removeFromParent();
     }
     actors = [];
+    anchors.length = 0;
   };
 
   /** 世界坐标 → 640×480 逻辑坐标（标签定位用） */
@@ -376,7 +389,7 @@ export async function createCharScene(host: HTMLElement): Promise<CharSceneHandl
       const el = document.querySelector<HTMLElement>(
         `#char-list .char-card[data-name="${slots[i].name}"]`
       );
-      const a = actors[i];
+      const a = anchors[i];
       if (!el || !a) continue;
       const head = toScreen(a.wx, a.wy, a.z + 2.05);
       el.style.left = `${head.x.toFixed(1)}px`;
@@ -396,22 +409,45 @@ export async function createCharScene(host: HTMLElement): Promise<CharSceneHandl
     async setChars(list: CharSlot[]) {
       slots = list.slice(0, CHAR_MAX);
       clearChars();
-      for (let i = 0; i < slots.length; i++) {
-        try {
-          // 原版：ChangeCharacterExt(slot, &CharSet[1]) —— 用角色自己那套装备
-          const gear = decodeCharSet(slots[i].charSet).equip;
-          gear.cls = slots[i].cls & 3;
-          const actor = await createPlayer(scene, PLAYER_DIR, gear);
-          actor.attachMeshes(scene);
-          placeChar(actor, slots[i].slot);
-          actor.play(PlayerAction.STOP_MALE, true);
-          actor.update(0);
-          applyCharLight(actor, charLight);
-          sharpen(actor, true);
-          actors.push(actor);
-        } catch (err) {
-          console.warn(`[char3d] 角色 ${slots[i].name} 模型加载失败`, err);
-        }
+
+      // ① 站位先定：名字标签立刻能画出来，不等模型
+      for (const s of slots) anchors.push(anchorOf(s.slot));
+      syncLabels();
+
+      /*
+       * ② 模型**并发**加载。
+       *
+       * 以前是 `for … await createPlayer()` 串行 4 只，线上每只一个 BMD +
+       * 若干装备模型，等于 4 个 RTT 周期排队；改成一轮并发，选角界面能先出来
+       * 再逐个补模型（模型没到也能选、也能点进游戏）。
+       */
+      const built = await Promise.all(
+        slots.map(async slot => {
+          try {
+            // 原版：ChangeCharacterExt(slot, &CharSet[1]) —— 用角色自己那套装备
+            const gear = decodeCharSet(slot.charSet).equip;
+            gear.cls = slot.cls & 3;
+            return await createPlayer(scene, PLAYER_DIR, gear);
+          } catch (err) {
+            console.warn(`[char3d] 角色 ${slot.name} 模型加载失败`, err);
+            return null;
+          }
+        })
+      );
+
+      // ③ 按顺序挂到场上（actors 顺序要和 slots 对齐：高亮/探针都按索引配对）
+      for (let i = 0; i < built.length; i++) {
+        const actor = built[i];
+        if (!actor) continue;
+        actor.attachMeshes(scene);
+        placeChar(actor, slots[i].slot);
+        actor.play(PlayerAction.STOP_MALE, true);
+        actor.update(0);
+        applyCharLight(actor, charLight);
+        sharpen(actor, true);
+        actors.push(actor);
+        // 每挂上一只就刷一次标签（不用等 4 只全好）
+        syncLabels();
       }
       paintHighlight();
       syncLabels();

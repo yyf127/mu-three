@@ -12,7 +12,7 @@ import {
   TW_WATER,
   type SpawnRect,
 } from './world/terrain';
-import { createWorldObjects, StaticObjectStats, WorldObjectsResult } from './world/objects';
+import { createWorldObjects, emptyWorldObjects, StaticObjectStats, WorldObjectsResult } from './world/objects';
 import { ObjectFxLayer } from './world/objectFx';
 import { AmbientLayer, createAmbient } from './world/ambient';
 import {
@@ -2818,6 +2818,31 @@ interface WorldState {
 }
 
 let world: WorldState | null = null;
+
+/**
+ * 「氛围粒子还在后台加载」时的空壳。
+ *
+ * 和 `emptyWorldObjects()` 一个用途：进场景提前到「地形 + 主角」就绪，
+ * 氛围层随后补上，这期间 `world.ambient.setRain/update/dispose` 都被每帧/协议调到。
+ */
+/** 最近一次天气包给的雨强度（0=停）。氛围层晚到时用它补一次 `setRain` */
+let rainTarget = 0;
+
+function emptyAmbient(): AmbientLayer {
+  const group = new THREE.Group();
+  group.name = 'ambient(loading)';
+  return {
+    group,
+    stats: [],
+    setRain() {},
+    rainLevel: () => rainTarget,
+    update() {},
+    dispose() {
+      group.removeFromParent();
+    },
+  };
+}
+
 let player: Actor | null = null;
 let monsters: Actor[] = [];
 let monsterShadows: { mesh: THREE.Mesh; actor: Actor }[] = [];
@@ -4520,6 +4545,8 @@ let itemSpecialTime: { number: number; until: number } | null = null;
  */
 function applyWeather(type: number, intensity: number) {
   const rain = type === 1 ? Math.max(0.05, intensity / 15) : 0;
+  // 氛围层可能还在后台加载，先记下来，替换时重放（见 loadWorld 的后台块）
+  rainTarget = rain;
   world?.ambient.setRain(rain);
   console.log(`[weather] 0x0F type=${type} intensity=${intensity} → rain ${rain.toFixed(2)}`);
 }
@@ -5477,28 +5504,13 @@ async function loadWorld(
     if (ix < 0 || iy < 0 || ix >= TERRAIN_SIZE || iy >= TERRAIN_SIZE) return -1;
     return layer1[iy * TERRAIN_SIZE + ix];
   };
-  const objects = await createWorldObjects(mapId, msg => setProgress(msg, 55), tileAt);
-  root.add(objects.group);
-  // 火把/篝火/街灯/蜡烛：物件动画之外的一层（源码 `FUN_0046c7f0` + AddTerrainLight）
-  const objectFx = new ObjectFxLayer(root, objects.fx);
-
-  /* ---- 环境粒子（源码 Weather_Update） ---- */
-  const ambient = await createAmbient(mapId, (x, y) => terrain.getHeight(x, y));
-  root.add(ambient.group);
-
-  setProgress(
-    `物件 ${objects.stats.placed}/${objects.stats.total}` +
-      `${objects.stats.hidden ? `（隐藏 ${objects.stats.hidden}）` : ''} · ` +
-      `${Math.round(objects.stats.triangles)} 三角面 · ${objects.stats.drawCalls} DrawCall` +
-      `${objects.anim.instances ? ` · 动画 ${objects.anim.instances} 件/${objects.anim.ids.length} 类` : ''}` +
-      `${ambient.stats.length ? ` · 氛围 ${ambient.stats.map(s => `${s.kind}×${s.count}`).join('/')}` : ''}`,
-    82
-  );
-
-  world = { mapId, terrain, objects, objectFx, ambient, root };
-  remotes.setTerrain(terrain);
-
-  /* ---- 主角 ---- */
+  /*
+   * ── 主角先加载 ────────────────────────────────────────────────────
+   *
+   * 顺序是「地形（含地面纹理）→ 主角 → 进场景」，物件/氛围/怪物全部挪到后台。
+   * 原来物件放在主角前面，洛兰 109 类物件在线上要 40-110 秒，读条一直卡在那里 ——
+   * 现在进图只等一张地形图 + 一个角色模型。
+   */
   const actor = await ensurePlayer();
   /*
    * 落点优先级：
@@ -5521,49 +5533,29 @@ async function loadWorld(
   // 出生点就是服务端认为我们所在的格（服务端 X/Y 是格坐标）
   resetMoveTracking(x, y);
 
-  /* ---- 怪物（仅离线演示） ---- */
+  /*
+   * ── 占位 world：物件还在后台，字段得先能调 ──────────────────────
+   *
+   * tick 每帧会 `world.objects.update()`、点地面要读 `placed`、销毁要
+   * `objectFx.dispose()` —— 用一个空壳顶着，后台加载完成后原地替换字段。
+   */
   clearMonsters();
-  if (opts.offline) {
-    // 用服务端刷怪表里的真实 Class：3=Spider、2=Budge Dragon、7=Bull Fighter、255=Barmaid(NPC)
-    const spots = [
-      { cls: 3, dx: -6, dy: 5 },
-      { cls: 2, dx: 5, dy: 7 },
-      { cls: 7, dx: 2, dy: 11 },
-      { cls: 255, dx: -4, dy: -5 },
-      { cls: 248, dx: 6, dy: -6 },
-    ];
-    for (const spot of spots) {
-      const created = await createCreatureByClass(
-        scene,
-        { monster: MONSTER_DIR, npc: NPC_DIR },
-        spot.cls
-      );
-      if (!created) continue;
-      const m = created.actor;
-      m.x = x + spot.dx;
-      m.y = y + spot.dy;
-      m.z = terrain.getHeight(m.x, m.y);
-      m.yaw = Math.random() * Math.PI * 2;
-      monsters.push(m);
-      if (playerShadow) addMonsterShadow(m);
-    }
-    await spawnSkillDummy(terrain);
-    /*
-     * 预热技能资源：面板随时可能点 Cast，别让第一次等一秒。
-     * 清单**从源码表反推**（`castOf` 的 parts），不再手写：
-     * 模型和贴图一起拉，`SKILL_FX` 只作为「源码没覆盖的技能」的补充。
-     */
-    void warmUpSkillAssets();
-  }
+  const objects = emptyWorldObjects();
+  const objectFx = new ObjectFxLayer(root, []);
+  const ambient = emptyAmbient();
+  root.add(objects.group);
+  world = { mapId, terrain, objects, objectFx, ambient, root };
+  remotes.setTerrain(terrain);
 
   /*
    * 小地图底图：切图就换一张。`buildMinimap()` 是纯客户端合成
    * （tile 平均色 + 山体阴影 + 水面），一次算 256×256，之后缓存。
+   * 只依赖地形，所以留在进场景之前。
    */
   const mapDef = getMapDefinition(mapId);
   minimap.setMap(mapDef.name, terrain.buildMinimap());
 
-  setProgress('完成', 100);
+  setProgress('进入场景', 88);
   showScreens({ hud: true });
   // 技能快捷键是按角色存的（原版 HotKey[4][64] 也是每个角色一份）
   loadSkillHotkeys();
@@ -5598,10 +5590,99 @@ async function loadWorld(
     world,
   };
 
-  console.log(
-    `[MU] ${def.english} 就绪：物件 ${objects.stats.placed}/${objects.stats.total}` +
-      `，缺失 ID ${[...objects.stats.missing].join(',') || '无'}，drawCall ${objects.stats.drawCalls}`
-  );
+  /*
+   * ── 后台加载：物件 → 物件特效 → 氛围 → 离线怪物 ─────────────────
+   *
+   * 这里**不 await**：上面已经 `showScreens({ hud: true })` 进场景了，玩家可以
+   * 立刻走动；地面物件在接下来几十秒里陆续出现（空 group 先挂着，加载完整体挂上）。
+   * `worldLoadSeq` 做守卫：中途换图/重连就丢弃这一次的结果。
+   */
+  const loadSeq = worldLoadSeq;
+  void (async () => {
+    try {
+      const real = await createWorldObjects(mapId, msg => setProgress(msg, 55), tileAt);
+      if (loadSeq !== worldLoadSeq || world?.root !== root) {
+        // 已经换图了：把这次白加载的几何丢掉
+        real.group.traverse(o => {
+          const m = o as THREE.Mesh;
+          m.geometry?.dispose();
+        });
+        return;
+      }
+      root.add(real.group);
+
+      // 物件特效层：先撤掉占位（空 spot），再按真实 fx 点重建
+      objectFx.dispose();
+      const fx = new ObjectFxLayer(root, real.fx);
+
+      const amb = await createAmbient(mapId, (xx, yy) => terrain.getHeight(xx, yy));
+      if (loadSeq !== worldLoadSeq || world?.root !== root) {
+        fx.dispose();
+        amb.dispose();
+        return;
+      }
+      root.add(amb.group);
+      amb.setRain(rainTarget);
+      ambient.dispose();
+
+      world.objects = real;
+      world.objectFx = fx;
+      world.ambient = amb;
+      installDebugApi({ renderer, scene, camera: muCamera.camera, terrain, player: actor, monsters, objects: real });
+      const mu = (window as any).__MU__;
+      if (mu) Object.assign(mu, { objects: real, objectFx: fx, ambient: amb });
+
+      setProgress(
+        `物件 ${real.stats.placed}/${real.stats.total}` +
+          `${real.stats.hidden ? `（隐藏 ${real.stats.hidden}）` : ''} · ` +
+          `${Math.round(real.stats.triangles)} 三角面 · ${real.stats.drawCalls} DrawCall` +
+          `${real.anim.instances ? ` · 动画 ${real.anim.instances} 件/${real.anim.ids.length} 类` : ''}` +
+          `${amb.stats.length ? ` · 氛围 ${amb.stats.map(x => `${x.kind}×${x.count}`).join('/')}` : ''}`,
+        100
+      );
+      console.log(
+        `[MU] ${def.english} 就绪：物件 ${real.stats.placed}/${real.stats.total}` +
+          `，缺失 ID ${[...real.stats.missing].join(',') || '无'}，drawCall ${real.stats.drawCalls}`
+      );
+
+      /* ---- 怪物（仅离线演示）：也不挡进场景 ---- */
+      if (opts.offline) {
+        if (loadSeq !== worldLoadSeq) return;
+        // 用服务端刷怪表里的真实 Class：3=Spider、2=Budge Dragon、7=Bull Fighter、255=Barmaid(NPC)
+        const spots = [
+          { cls: 3, dx: -6, dy: 5 },
+          { cls: 2, dx: 5, dy: 7 },
+          { cls: 7, dx: 2, dy: 11 },
+          { cls: 255, dx: -4, dy: -5 },
+          { cls: 248, dx: 6, dy: -6 },
+        ];
+        for (const spot of spots) {
+          const created = await createCreatureByClass(
+            scene,
+            { monster: MONSTER_DIR, npc: NPC_DIR },
+            spot.cls
+          );
+          if (!created) continue;
+          const m = created.actor;
+          m.x = x + spot.dx;
+          m.y = y + spot.dy;
+          m.z = terrain.getHeight(m.x, m.y);
+          m.yaw = Math.random() * Math.PI * 2;
+          monsters.push(m);
+          if (playerShadow) addMonsterShadow(m);
+        }
+        await spawnSkillDummy(terrain);
+        /*
+         * 预热技能资源：面板随时可能点 Cast，别让第一次等一秒。
+         * 清单**从源码表反推**（`castOf` 的 parts），不再手写：
+         * 模型和贴图一起拉，`SKILL_FX` 只作为「源码没覆盖的技能」的补充。
+         */
+        void warmUpSkillAssets();
+      }
+    } catch (err) {
+      console.warn('[MU] 物件/氛围后台加载失败（场景仍可玩）', err);
+    }
+  })();
 }
 
 /**

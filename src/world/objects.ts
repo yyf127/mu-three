@@ -493,6 +493,41 @@ export interface WorldObjectsResult {
   };
 }
 
+/**
+ * 「物件还在后台加载」时的空壳。
+ *
+ * 进场景已经提前到「地形 + 地面纹理 + 主角就绪」，物件继续在后台加载；
+ * 这期间 `world.objects` 必须可调用（tick 每帧 `update()`、点地面要 `placed`），
+ * 所以给一份空实现，加载完成后原地替换字段（引用不变，tick 自动用新的）。
+ */
+export function emptyWorldObjects(): WorldObjectsResult {
+  const group = new THREE.Group();
+  group.name = 'world-objects(loading)';
+  return {
+    group,
+    stats: {
+      total: 0,
+      placed: 0,
+      hidden: 0,
+      missing: new Set<number>(),
+      triangles: 0,
+      drawCalls: 0,
+      bad: 0,
+      hiddenIds: {},
+    },
+    fx: [],
+    anim: { ids: [], instances: 0, bones: 0 },
+    update() {},
+    insideRoof: () => false,
+    effectMeshes: [],
+    setEffectVisible() {},
+    placed: [],
+    hiddenPlaced: [],
+    modelStats: [],
+    roofs: () => ({ houses: 0, roofMeshes: 0, hidden: 0, list: [] }),
+  };
+}
+
 export interface StaticObjectStats {
   total: number;
   placed: number;
