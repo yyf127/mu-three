@@ -4283,3 +4283,61 @@ await prewarmObjectAssets(mapId, counts, objectDir, onProgress);  // 主循环�
 - 预载失败**不影响正确性**：主循环会重新 `fetchBytes` / `loadTexture`。
 - `fetchBytes` 会把失败（404）也缓存成 rejected promise，所以同一路径不会反复请求。
 - 并发的是**网络**，几何构建/合并仍然是单线程顺序执行，不会引入乱序问题。
+
+# 阶段 CK：仓库改成「源码 + 资源」，Pages 走 Actions 构建
+
+## 一、为什么改
+
+之前推的是 `dist/` 构建产物（3554 个文件、209MB），仓库里没有一行源码 ——
+改一个字符串要本地构建再整份推。用户要的是**源码入库、CI 构建、Pages 发布**。
+
+## 二、仓库结构（3837 个文件）
+
+| 路径 | 文件数 | 说明 |
+|---|---|---|
+| `src/` | 96 | TS/CSS 源码 |
+| `tools/` | 175 | 探针、`serve-gh`、生成脚本 |
+| `docs/` | 7 | 文档 |
+| `server/` | 3 | WS ↔ TCP 网关 |
+| `dist/Data/` | 3548 | 原版资源（208MB），`localAssets()` 直接托管 |
+| 根 | 7 | `index.html`、`vite.config.ts`、`tsconfig.json`、`package*.json`、`README.md`、`.gitignore` |
+| `.github/workflows/deploy.yml` | 1 | Pages 构建 + 发布 |
+
+`.gitignore` 只放行 `dist/Data`，其它 `dist/*`（`index.html`、`404.html`、`assets/`）
+都是 CI 产物；`node_modules`、`*.log`、`shots/`、`*.png`、`dist-verify/`、`.tmp/`、
+`net-test.html`、`.workbuddy/` 全部排除。
+
+## 三、Actions
+
+```yaml
+push main → checkout → setup-node 20 → npm ci → npm run build
+         → upload-pages-artifact(dist) → deploy-pages
+```
+
+`npm run build` 里的 `tsc --noEmit` 充当类型门禁；`dist/base = /mu-three/` 由
+`vite.config.ts` 按 `command` 决定，CI 不需要额外参数。
+
+## 四、两个坑
+
+### 1）切 `build_type=workflow` 后，旧的 branch 构建会盖一次
+
+旧的 `pages-build-deployment` 还在队列里，它按 Jekyll 把**源码根目录**发上去：
+`/mu-three/` 是未编译的 `index.html`（`<script src="/src/main.ts">`），
+`assets/*` 全 404 → 白屏。必须 `gh workflow run deploy-pages` 再发一次。
+
+### 2）git 协议推不上去时，用 Git Data API
+
+本机到 `github.com:443` 反复 `502 / Failed to connect`，但 `api.github.com` 正常。
+最后用 REST API 建树：逐个 `POST /git/blobs`（`dist/Data` 直接复用远端已有 tree，
+一个字节都不重传）→ 自底向上 `POST /git/trees` → `POST /git/commits` → `PATCH /git/refs`。
+推完 `tree sha` 与本地 HEAD 完全一致（`afa00abb`）。
+
+## 五、验证
+
+| 检查 | 结果 |
+|---|---|
+| 干净检出（`git clone` 后只有 `dist/Data`）`npm run build` | PASS，产物哈希与本地一致（`index-uM2R-vKj.js`） |
+| Actions `deploy-pages` | success（build 54s / deploy 12s） |
+| `curl /mu-three/`、`/index.html`、`/assets/*.js`、`/assets/*.css`、`/404.html` | 全 200 |
+| `demo-probe`（线上） | PASS 28/28 |
+| 线上进图耗时 | 新部署后首次冷 **111.5s / 读条 143.4s**；紧接着再跑 **43.1s / 72.8s** |

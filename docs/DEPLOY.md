@@ -81,6 +81,23 @@ gh run watch
 gh api repos/yyf127/mu-three/pages --jq '{status, html_url, build_type}'
 ```
 
+### ⚠️ 从「分支发布」切到「Actions」后必须手动再跑一次
+
+切换 `build_type=workflow` 之前排队的旧 `pages-build-deployment` 还会跑一次，
+它会按 Jekyll 从**源码根目录**发布（根目录没有构建产物），结果：
+`/mu-three/` 返回的是未编译的 `index.html`（里面是 `<script src="/src/main.ts">`），
+`/mu-three/assets/*` 全 404 —— 页面白屏。
+
+处理：`gh workflow run deploy-pages`（或 Actions 页面 Run workflow）重新部署一次，
+以 artifact 为准：
+
+```bash
+gh api repos/yyf127/mu-three/pages --jq '.build_type'     # 应为 workflow
+gh workflow run deploy-pages --ref main
+gh run watch
+curl -s https://yyf127.github.io/mu-three/index.html | grep assets/index   # 应命中构件名
+```
+
 ### 首次 / 换仓库时的一次性设置
 
 1. 仓库 **Settings → Pages → Source = GitHub Actions**（`build_type=workflow`）；
