@@ -1000,6 +1000,16 @@ function selectSkillByHotkey(key: number): boolean {
  * 「当前角色的等级、金币、有没有翅膀」喂给它。
  */
 const movePanel = new MoveCommandPanel(uiLayer);
+
+/*
+ * 小地图左下角那颗「M」= 打开移动命令面板，和按 M 键完全同一条路径
+ * （同样先 `refreshMovePanel()` 灌等级/金币，再 show）。
+ */
+minimap.onMove = () => {
+  if (!player || !world) return;
+  refreshMovePanel();
+  movePanel.show();
+};
 movePanel.onWarp = entry => void warpTo(entry);
 
 /**
@@ -7478,8 +7488,16 @@ function pickMonsterAt(clientX: number, clientY: number): number | null {
  * 那种会吃掉旁边地面的大框。
  */
 const localPickRay = new THREE.Raycaster();
-const localPickV = new THREE.Vector3();
 
+/**
+ * 屏幕坐标 → 本地怪 / NPC 的 id（离线演示）。
+ *
+ * **只认真射线**（打模型网格），不做「投影包围盒」兜底 ——
+ * 那套兜底曾经把整片地面都算成点到 NPC：玩家点地板想走，结果每次都被判成
+ * 「和旁边的卫兵说话」，人一动不动，只有转一下视角（投影位置变了）才恢复。
+ * 怪/NPC 的模型是蒙皮网格，挂在 **scene** 上（`Actor.attachMeshes(scene)`），
+ * 所以要对 `actor.meshes`/`props` 求交，打 `actor.root` 里面是空的。
+ */
 function pickLocalActorAt(
   clientX: number,
   clientY: number,
@@ -7500,56 +7518,26 @@ function pickLocalActorAt(
   const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
   const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
   localPickRay.setFromCamera(new THREE.Vector2(ndcX, ndcY), muCamera.camera);
-  localPickRay.far = 60;
+  localPickRay.far = 40;
 
-  /*
-   * ① 真射线打网格。
-   *
-   * 注意 `Actor.attachMeshes(scene)` 是把蒙皮网格挂到 **scene** 上（骨骼在世界坐标里，
-   * 网格自身在原点），所以不能只打 `actor.root` —— 那里面是空的。这里直接对
-   * `actor.meshes` 求交，再反查属于谁。
-   */
-  const meshOwner = new Map<THREE.Object3D, number>();
-  for (const e of entries) for (const m of e.actor.meshes) meshOwner.set(m, e.id);
-  const meshes = [...meshOwner.keys()];
-  if (meshes.length) {
-    const hit = localPickRay.intersectObjects(meshes, false)[0];
-    if (hit) {
-      const id = meshOwner.get(hit.object);
-      if (id !== undefined) return id;
-    }
-  }
-
-  /*
-   * ② 投影包围盒兜底（脚 → 头顶 1.5 格）。
-   *
-   * 和联机 `remotes.hoverAt` 同一套口径：蒙皮网格的射线有时候擦边不中
-   * （骨骼动画的包围球没跟到当前帧），用屏幕上的「身体竖条」补一次。
-   */
-  let bestId: number | null = null;
-  let bestDist = Infinity;
+  const owner = new Map<THREE.Object3D, number>();
   for (const e of entries) {
-    const px = e.actor.wx;
-    const py = e.actor.wy;
-    const z = e.actor.z;
-    localPickV.set(px, py, z).project(muCamera.camera);
-    if (localPickV.z > 1) continue;
-    const fx = (localPickV.x * 0.5 + 0.5) * rect.width + rect.left;
-    const fy = (-localPickV.y * 0.5 + 0.5) * rect.height + rect.top;
-    localPickV.set(px, py, z + 1.5).project(muCamera.camera);
-    const hx = (localPickV.x * 0.5 + 0.5) * rect.width + rect.left;
-    const hy = (-localPickV.y * 0.5 + 0.5) * rect.height + rect.top;
-    const height = Math.max(8, Math.hypot(hx - fx, hy - fy));
-    const rx = height * 0.34;
-    if (Math.abs(clientX - (fx + hx) / 2) > rx) continue;
-    if (clientY < hy - height * 0.15 || clientY > fy + 4) continue;
-    const d = Math.hypot(clientX - fx, clientY - fy);
-    if (d < bestDist) {
-      bestDist = d;
-      bestId = e.id;
+    for (const m of e.actor.meshes) owner.set(m, e.id);
+    for (const m of e.actor.props) owner.set(m, e.id);
+  }
+  if (!owner.size) return null;
+
+  const hits = localPickRay.intersectObjects([...owner.keys()], true);
+  for (const hit of hits) {
+    // props 是骨骼子节点，往上找到登记过的那个对象
+    let o: THREE.Object3D | null = hit.object;
+    while (o) {
+      const id = owner.get(o);
+      if (id !== undefined) return id;
+      o = o.parent;
     }
   }
-  return bestId;
+  return null;
 }
 
 /**

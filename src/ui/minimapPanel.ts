@@ -72,6 +72,10 @@ export class MinimapPanel {
   private title: HTMLDivElement;
   private coord: HTMLDivElement;
   private zoomBtn: HTMLDivElement;
+  /** 边框左下角那颗「M」：打开移动命令（等价于按 M 键） */
+  private moveBtn: HTMLDivElement;
+  /** 点「M」时的回调（由 main.ts 接到 `movePanel.show()`） */
+  onMove: (() => void) | null = null;
 
   private base: HTMLCanvasElement | null = null;
   private mapName = '';
@@ -122,6 +126,36 @@ export class MinimapPanel {
 
     parent.add(this.root);
 
+    /*
+     * 左下角那颗「M」= 移动命令面板（0.97 没有，给触屏补的入口）。
+     *
+     * **挂在 UI 层、不放进小地图框里**：小地图 z-index 只有 3，而背包 / 商店面板是 10，
+     * 一旦它们展开就会盖住小地图下半截，按钮跟着点不到（实测 elementFromPoint 命中的是
+     * `inv-equip-slot`）。所以这里自己算一个绝对位置贴在边框左下角那块空格上，
+     * 层级放到面板之上、读条层之下。
+     */
+    this.moveBtn = document.createElement('div');
+    this.moveBtn.className = 'minimap-move hidden';
+    this.moveBtn.textContent = 'M';
+    this.moveBtn.title = '移动命令（快捷键 M）';
+    const frameLeft = UI_W - FRAME_W * SCALE - MARGIN;
+    this.moveBtn.style.left = `${frameLeft + 6 * SCALE}px`;
+    this.moveBtn.style.top = `${MARGIN + 150 * SCALE}px`;
+    this.moveBtn.style.width = `${22 * SCALE}px`;
+    this.moveBtn.style.height = `${18 * SCALE}px`;
+    this.moveBtn.style.lineHeight = `${18 * SCALE}px`;
+    this.moveBtn.style.fontSize = `${12 * SCALE}px`;
+    this.moveBtn.addEventListener('click', e => {
+      // 别让点击漏给 3D 画布（否则顺手点走一格）
+      e.stopPropagation();
+      e.preventDefault();
+      this.onMove?.();
+    });
+    for (const type of ['pointerdown', 'mousedown'] as const) {
+      this.moveBtn.addEventListener(type, e => e.stopPropagation());
+    }
+    parent.add(this.moveBtn);
+
     void uiSprite('MiniMap.OZT').then(sprite => {
       if (sprite) this.root.style.backgroundImage = `url("${sprite.url}")`;
     });
@@ -143,6 +177,8 @@ export class MinimapPanel {
   setVisible(on: boolean) {
     this.openState = on;
     this.root.classList.toggle('hidden', !on);
+    // 「M」按钮跟着小地图一起显隐（它挂在 UI 层，不在 `root` 里）
+    this.moveBtn.classList.toggle('hidden', !on);
   }
 
   toggle() {

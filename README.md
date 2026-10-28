@@ -400,6 +400,8 @@ npm run net:login:browser   # 无头浏览器跑 net-test.html（同一套前端
 `__MU_APP__` 上有调试口：`demoMonsters()` / `demoNpcs()` / `demoShop()` /
 `demoWarehouse()` / `progress()` / `demoDrops()` / `bag()` / `attack(id)`。
 
+小地图边框左下角有一颗 **M**，点它等于按 M（移动命令面板，手机上没有键盘也能用）。
+
 ### 地图资源是「地图号 + 1」
 
 | 地图号 | 地图 | 资源目录 |
