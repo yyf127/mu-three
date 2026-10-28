@@ -4341,3 +4341,68 @@ push main → checkout → setup-node 20 → npm ci → npm run build
 | `curl /mu-three/`、`/index.html`、`/assets/*.js`、`/assets/*.css`、`/404.html` | 全 200 |
 | `demo-probe`（线上） | PASS 28/28 |
 | 线上进图耗时 | 新部署后首次冷 **111.5s / 读条 143.4s**；紧接着再跑 **43.1s / 72.8s** |
+
+# 阶段 CL：选角/进图分阶段加载 + 去掉地面光斑
+
+## 一、选角：先站位和名字，模型并发
+
+`charScene.setChars` 原来是「for 循环里逐只 `await createPlayer`」，
+4 只角色 = 4 个 BMD + 若干装备模型串行排队；名字标签又挂在 `actors[i]` 上，
+**模型没加载完，名字也不出来**。
+
+改法：
+
+| 以前 | 现在 |
+|---|---|
+| `actors[i]` 才能定位标签 | 新增 `anchors[]`：按槽位算站位（`slot*100, slot*50-50`），`setChars` 一进来就填好 → 名字立刻投影到位 |
+| 模型串行 | `Promise.all` 4 路并发，挂上一只就 `syncLabels()` 一次 |
+| 名字等模型 | 名字先出，模型随后补（选中/高亮/`probe` 仍按索引配对，行为不变） |
+
+所以「角色模型还没加载完就能选、能点进入游戏」—— 按钮本来就只看
+`selectedCharName`，现在不再有模型串行拖时间。
+
+## 二、进图：地形就绪就进场景，物件后台补
+
+`loadWorld` 原顺序：天空 → 地形 → **物件（109 类，线上 40-110s）** → 氛围 →
+主角 → 怪物 → 进场景。读条卡在物件那一段。
+
+新顺序：
+
+```
+天空 → 地形（含地面纹理） → 主角 → 占位 world → 小地图 → showScreens(hud)  ← 进场景
+                                        └─ 后台：物件 → 物件特效 → 氛围 → 离线怪物
+```
+
+- 占位：`emptyWorldObjects()` / `emptyAmbient()`（`src/world/objects.ts`、`main.ts`），
+  因为 tick 每帧要 `world.objects.update()`、点地面读 `placed`、销毁调 `dispose()`；
+- 后台完成时**原地替换** `world.objects/objectFx/ambient`，`__MU__` 同步 `Object.assign`；
+- `worldLoadSeq` 守卫：后台跑一半换图就 `dispose()` 掉这次结果，不污染新图；
+- 天气包可能早于氛围层到达 → `rainTarget` 记着，氛围就绪后 `setRain` 重放；
+- `notifyViewportReady()`（联机 `F3/12`）跟着进场景一起发，不再等物件。
+
+实测：本地 serve-gh 进图 **1.4-1.7s**；线上 GH Pages 新部署首次 **21.9s**（此前 111s），
+进场景瞬间 `placed=0`，2 秒后 2792 个实例挂上。
+
+## 三、地面光斑（AddTerrainLight）关掉
+
+`World/ObjectFx` 里给街灯/蜡烛/篝火画的那张朝上加色圆盘（`s.kind === 'glow'`，
+`scale = range*2` 米）在洛兰这种密集摆件地图上会叠成大片黄圈。原版是给**地形顶点**
+加亮，本来就不该是一个圆盘。
+
+```ts
+// world/objectFx.ts
+private static readonly GROUND_GLOW = false;   // 需要时改回 true
+...
+if (s.kind === 'glow' && !ObjectFxLayer.GROUND_GLOW) continue;
+```
+
+火焰（`objfx:fire:*`）和烟保留。本地实测 `objfx:glow` 节点数 = **0**，火焰 267 个。
+
+## 四、验证
+
+| 检查 | 结果 |
+|---|---|
+| `npm run tsc` / `npm run build` | PASS（3.44s） |
+| `demo-probe`（本地 / 线上） | 28/28 / 28/28，进图 1.7s / 21.9s |
+| 渐进加载 | 进场景 `placed=0` → 2s 后 `placed=2792`；`glow=0` / `fire=267`（本地/线上一致） |
+| `esc-probe`（实机：真登录 + 刷怪 + 攻击 + ESC） | PASS，画面正常 |
