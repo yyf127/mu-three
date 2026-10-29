@@ -53,10 +53,16 @@ let musicEl: HTMLAudioElement | null = null;
 let musicFile: string | null = null;
 /** 已加载的音频缓冲（按文件缓存） */
 const buffers = new Map<string, Promise<AudioBuffer | null>>();
-/** 每个 id 正在响的实例（对应原版 4 个通道） */
-const active = new Map<number, Playing[]>();
+/**
+ * 每个「通道键」正在响的实例（对应原版 4 个通道）。
+ *
+ * 键是字符串而不是数字 id：怪物音效**没有固定 id**（原版每次加载地图时把
+ * 120..419 分配给 `Monster{N}.bmd` 的 5 条音，见 `Monster_Data.cpp`），
+ * 所以那边直接用文件名当键。
+ */
+const active = new Map<string, Playing[]>();
 /** 已占用但还在解码的槽位（防止同一 tick 连发 5 声都通过通道检查） */
-const pending = new Map<number, number>();
+const pending = new Map<string, number>();
 
 let ctx: AudioContext | null = null;
 /**
@@ -245,12 +251,36 @@ export interface SfxOptions {
  * `id` 就是 `PlayBuffer(id)`，表见 `src/data/sounds.ts`。
  */
 export function sfx(id: number, opt: SfxOptions = {}): boolean {
-  if (!audioReady() || !ctx || !sfxBus) {
+  const def = SOUND_BY_ID.get(id);
+  if (!def) {
     debugState.dropped++;
     return false;
   }
-  const def = SOUND_BY_ID.get(id);
-  if (!def) {
+  const ok = playKey(`#${id}`, def, opt);
+  if (ok) debugState.lastId = id;
+  return ok;
+}
+
+/**
+ * 按**文件名**播一个音效，给「没有固定 id」的场合用。
+ *
+ * 怪物音效就是这种：原版每次进图时把 120..419 这 300 个槽按需分配给
+ * `Monster{N}.bmd`（`Monster_Data.cpp` 的 `LoadWaveFile(0xaa + i, …)`），
+ * id 会随地图变化，唯一稳定的身份是文件名本身。
+ *
+ * `channels` 默认 2 —— 原版怪物音全是 `LoadWaveFile(id, path, 2, 1)`。
+ */
+export function sfxFile(file: string, opt: SfxOptions = {}, channels = 2): boolean {
+  return playKey(file, { file, channels, pos3d: true }, opt);
+}
+
+/** `sfx` / `sfxFile` 的公共实现：`key` 只用于通道簿记 */
+function playKey(
+  key: string,
+  def: { file: string; channels: number; pos3d: boolean },
+  opt: SfxOptions
+): boolean {
+  if (!audioReady() || !ctx || !sfxBus) {
     debugState.dropped++;
     return false;
   }
@@ -262,19 +292,19 @@ export function sfx(id: number, opt: SfxOptions = {}): boolean {
    * AudioContext 被挂起（无手势/headless）时 `currentTime` 是**冻结**的，
    * 拿它算「这条还在响吗」会让通道永远不释放，第二次就再也发不出声。
    */
-  const list = active.get(id) ?? [];
+  const list = active.get(key) ?? [];
   const now = performance.now() / 1000;
   const alive = list.filter(p => now - p.at < 2.5);
-  const busy = alive.length + (pending.get(id) ?? 0);
+  const busy = alive.length + (pending.get(key) ?? 0);
   if (!opt.force && busy >= def.channels) {
     debugState.dropped++;
     return false;
   }
-  pending.set(id, (pending.get(id) ?? 0) + 1);
+  pending.set(key, (pending.get(key) ?? 0) + 1);
 
   const bufTask = loadBuffer(def.file);
   void bufTask.then(buf => {
-    pending.set(id, Math.max(0, (pending.get(id) ?? 1) - 1));
+    pending.set(key, Math.max(0, (pending.get(key) ?? 1) - 1));
     if (!buf || !ctx || !sfxBus) return;
 
     /* 距离/方位（只有 3D 音才做，界面上那几声固定居中） */
@@ -316,19 +346,40 @@ export function sfx(id: number, opt: SfxOptions = {}): boolean {
 
     src.start();
     src.onended = () => {
-      const arr = (active.get(id) ?? []).filter(q => q.src !== src);
-      if (arr.length) active.set(id, arr);
-      else active.delete(id);
+      const arr = (active.get(key) ?? []).filter(q => q.src !== src);
+      if (arr.length) active.set(key, arr);
+      else active.delete(key);
     };
     debugState.played++;
-    debugState.lastId = id;
     const t = performance.now() / 1000;
-    const arr = (active.get(id) ?? []).filter(q => t - q.at < 2.5);
+    const arr = (active.get(key) ?? []).filter(q => t - q.at < 2.5);
     arr.push({ src, at: t });
-    active.set(id, arr);
+    active.set(key, arr);
   });
 
   return true;
+}
+
+/**
+ * 界面音效的三个快捷入口。
+ *
+ * id 来自**第二张表**（`Scene_AssetLoad.cpp:159-166`，不是 `OpenSounds`）：
+ *
+ *   0x19 `iButtonClick`  按钮「叮」
+ *   0x1a `iButtonError`  操作失败（钱不够、等级不够、背包满…）
+ *   0x1c `iCreateWindow` 开窗口
+ *
+ * 原版这些都在 `CUIManager` 里固定播，所以统一给个偏小的音量，
+ * 不然连点会盖过战斗音。
+ */
+export function sfxClick() {
+  return sfx(0x19, { volume: 0.5 });
+}
+export function sfxError() {
+  return sfx(0x1a, { volume: 0.6 });
+}
+export function sfxOpenWindow() {
+  return sfx(0x1c, { volume: 0.55 });
 }
 
 /** 一组里随机取一个（原版大量用 `rand()%n` 选变体） */

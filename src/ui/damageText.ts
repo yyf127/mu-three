@@ -6,8 +6,24 @@
  */
 import * as THREE from 'three';
 
-interface FloatItem {
-  el: HTMLDivElement;
+/**
+ * 服务端伤害类型 → 飘字样式。
+ *
+ * 类型在 `damage[0]` 的高 4 位（`GameServer/User.h:136-140`）：
+ *
+ *   0x00 普通   0x10 无视防御   0x20 反射   0x40 卓越一击   0x80 暴击
+ *
+ * 暴击是 **0x80**（`DAMAGE_TYPE_CRITICAL`），不是 0x10 —— 后者是
+ * `DAMAGE_TYPE_IGNORE`（毒/火/坠落这类跳过防御的伤害）。
+ */
+export function damageClassOf(type: number): '' | 'crit' | 'exc' | 'hurt' {
+  if (type === 0x80) return 'crit';
+  if (type === 0x40) return 'exc';
+  if (type === 0x10) return 'hurt';
+  return '';
+}
+
+interface FloatItem {  el: HTMLDivElement;
   /** 世界坐标 */
   x: number;
   y: number;
@@ -32,7 +48,7 @@ export class DamageTexts {
   spawn(
     world: { x: number; y: number; z: number },
     text: string,
-    cls: '' | 'crit' | 'exp' | 'hurt' = ''
+    cls: '' | 'crit' | 'exc' | 'exp' | 'hurt' = ''
   ) {
     const el = document.createElement('div');
     el.className = `dmg ${cls}`.trim();

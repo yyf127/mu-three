@@ -1,0 +1,24 @@
+/**
+ * Cloudflare Workers 静态资源部署配置（`wrangler deploy` 读这个文件）。
+ *
+ * 为什么需要它：这个项目是纯静态的 Vite 产物，Workers 本身不知道静态文件在
+ * 哪 —— 没有 `assets` 段的话，`npx wrangler deploy` 会发一个「没有脚本、也
+ * 没有资源」的空 Worker 上去，访问任何路径都是 404。
+ *
+ * `not_found_handling` 选 `single-page-application`：没匹配到文件时返回
+ * `index.html`（200）。这样 `/demo` 直接落到同一份页面，运行时靠
+ * `location.pathname` 判断走离线演示 —— 不需要 `404.html` 兜底。
+ *
+ * 注意 base：Workers 部署在**根路径**，构建时必须
+ *   MU_BASE=/ npm run build
+ * 否则产物里的 `/mu-three/assets/...` 全部 404（那是 GitHub Pages 的子路径）。
+ */
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mu-three",
+  "compatibility_date": "2025-09-01",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

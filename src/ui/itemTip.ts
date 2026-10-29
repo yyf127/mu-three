@@ -28,7 +28,8 @@
  */
 import { textSync } from '../data/localText';
 import { itemAttr } from '../data/itemAttrs';
-import { itemStats } from './itemRules';
+import { itemPower } from '../data/itemPower';
+import { itemStats, additionalLines, excellentLines } from './itemRules';
 import { itemValueOf } from '../data/serverTables';
 import { itemReqClassSync } from '../data/localText';
 
@@ -68,7 +69,12 @@ export function fmt2(idx: number, fallback: string, a: number | string, b: numbe
 export interface TipItem {
   type: number;
   level: number;
+  /** 追加等级 0..7 */
   option?: number;
+  /** 卓越位掩码 0..63（非 0 = 卓越） */
+  excellent?: number;
+  /** 幸运位：服务端映射成暴击率 +5%（选项码 64） */
+  luck?: boolean;
   durability?: number;
 }
 
@@ -170,8 +176,35 @@ export function itemTipHtml(item: TipItem, withPrice = false): string {
   const attr = itemAttr(item.type);
   const plus = item.level > 0 ? `+${item.level}` : '';
   const extra = item.option && item.option > 0 ? ` (追加 +${item.option})` : '';
-  const lines: string[] = [`<b class="tip-name">${plus}${attr.name}${extra}</b>`];
-  for (const s of itemStats(item.type)) lines.push(`<span class="tip-stat">${s}</span>`);
+  /*
+   * 卓越前缀：原版是 `"%s %s +%u"` →「Excellent 名字 +N」（`RenderItemInfo.cpp:2053`），
+   * 前缀在最前面、等级紧贴名字。中文版取 `Text.bmd[620]`，没加载时兜底「卓越的」。
+   */
+  const excPrefix = item.excellent ? textSync(620, '卓越的') : '';
+  const nameLine = `${excPrefix ? `${excPrefix} ` : ''}${plus}${attr.name}${extra}`;
+  const lines: string[] = [`<b class="tip-name">${nameLine}</b>`];
+  for (const s of itemStats(item.type, item)) {
+    lines.push(`<span class="tip-stat">${s}</span>`);
+  }
+  /*
+   * 特殊选项按原版 `SpecialNum` 的 push 顺序：**幸运 → 追加 → 卓越**
+   * （`Item_LegacyLinker.cpp:412` 先 push 64，再进 option3 段，最后才是 66..79）。
+   *
+   * 幸运（Luck）不只是好看：服务端把它映射成 `ITEM_OPTION_ADD_CRITICAL_DAMAGE_RATE`
+   * （选项码 64，`ItemOption.cpp:268`），也就是**暴击率 +5%**
+   * （`Attack.cpp:1122` 的 `rand()%100 < CriticalDamageRate`）。
+   */
+  if (item.luck) {
+    const tpl = textSync(87, '幸运(灵魂宝石之成功机率 +25%)');
+    // 模板里是 `+25%%`（sprintf 转义），要折叠成单个 `%`
+    lines.push(`<span class="tip-exc">${fillTemplate(tpl, [])}</span>`);
+  }
+  for (const s of additionalLines(item.type, item)) {
+    lines.push(`<span class="tip-stat">${s}</span>`);
+  }
+  for (const s of excellentLines(item.type, item.excellent ?? 0)) {
+    lines.push(`<span class="tip-exc">${s}</span>`);
+  }
 
   /*
    * 耐久 / 数量 / 生命 —— 分支和 `RenderItemInfo.cpp:1800` 一一对应：
@@ -198,12 +231,18 @@ export function itemTipHtml(item: TipItem, withPrice = false): string {
    * `GlobalText[74] "(还需 %d)"`（红色）。
    */
   if (attr.slot >= 0) {
+    /*
+     * 需求的四个数走 `itemPower(type, level)` —— 强化会同时抬高等级/力量/敏捷/智力
+     * 需求（`CItem::Convert`），照 Item.txt 裸值显示的话 +9 的装备看着「能穿」，
+     * 拖上去却会被服务端弹回来（0x24 只回 0xFF，不带原因）。
+     */
+    const power = itemPower(item.type, item);
     const reqLines: Array<[number, string, number, number]> = [
       // [GlobalText 索引, 兜底模板, 需求值, 当前值]
-      [73, '所需力量: %d', attr.reqStr, HERO.str],
-      [75, '所需敏捷: %d', attr.reqAgi, HERO.agi],
-      [77, '所需智力: %d', attr.reqEne, HERO.ene],
-      [76, '所需等级: %d', attr.reqLevel, HERO.level],
+      [73, '所需力量: %d', power.reqStr, HERO.str],
+      [75, '所需敏捷: %d', power.reqAgi, HERO.agi],
+      [77, '所需智力: %d', power.reqEne, HERO.ene],
+      [76, '所需等级: %d', power.reqLevel, HERO.level],
     ];
     for (const [idx, fb, need, have] of reqLines) {
       if (!need) continue;

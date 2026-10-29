@@ -33,6 +33,7 @@
  * 文案用中文（和本 port 其它窗口一致），但位置、字号、颜色、贴图全部照原版；
  * 原版对应的 GlobalText 索引写在旁边，要切英文直接换 `TEXT` 表即可。
  */
+import { sfxError } from '../audio/sound';
 import { UiLayer } from './frame';
 import { textSync } from '../data/localText';
 import { uiSprite, preloadUi } from './ozj';
@@ -195,7 +196,11 @@ export class NpcPanel {
   onRepairAll: (() => void) | null = null;
   onDepositAll: (() => void) | null = null;
   onWithdrawAll: (() => void) | null = null;
-  /** 仓库锁：本 port 还没做密码输入界面，先给出提示 */
+  /**
+   * 仓库锁按钮。**密码界面是有的**（`main.ts::openWarehousePasswordDialog`，
+   * 走 `PromptDialog` 收「密码 + 账号个人码」）—— 这里以前写着「本 port 还没做」，
+   * 是当时留下的过期注释。
+   */
   onToggleLock: (() => void) | null = null;
 
   constructor(private layer: UiLayer) {
@@ -723,7 +728,8 @@ export class NpcPanel {
   }
 
   /** 操作反馈（2 秒后消失）。放在面板下方，不遮原版元素 */
-  toast(text: string, kind: 'ok' | 'error' | '' = '') {
+    toast(text: string, kind: 'ok' | 'error' | '' = '') {
+    if (kind === 'error') sfxError();
     this.toastEl.textContent = text;
     this.toastEl.className = `npc-toast ${kind}`.trim();
     window.clearTimeout(this.toastTimer);

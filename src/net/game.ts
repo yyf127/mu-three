@@ -155,12 +155,21 @@ export function parseViewportSummons(pkt: Uint8Array): ViewportMonster[] | null 
   const body = pkt.length - 5;
   if (body % count !== 0) return null;
   const stride = body / count;
-  if (stride < 12) return null;
+  /*
+   * 每条的字段是 `PMSG_VIEWPORT_SUMMON`（`Viewport.h:66`）：
+   *
+   *   index[2]  type  [pad]  ViewSkillState(WORD)  x  y  tx  ty  DirAndPkLevel  name[10]
+   *   0,1       2     3      4,5                  6  7  8   9   10             11..20
+   *
+   * ⚠️ 这个头文件**没有 `#pragma pack(1)`**，是按 MSVC 默认对齐的：
+   * `WORD` 要从偏移 4 开始，所以 `type` 后面有 1 字节填充；总大小 21 → 对齐到 22。
+   * （别被 `Protocol.h` 里那几个真的加了 `pack(1)` 的结构带偏 —— 这里不是。）
+   */
+  if (stride < 22) return null;
 
   const out: ViewportMonster[] = [];
   for (let i = 0; i < count; i++) {
     const o = 5 + i * stride;
-    const name = stride >= 22 ? readName(pkt, o + 11) : '';
     out.push({
       id: ((pkt[o] & 0x7f) << 8) | pkt[o + 1],
       type: pkt[o + 2],
@@ -172,7 +181,7 @@ export function parseViewportSummons(pkt: Uint8Array): ViewportMonster[] | null 
       dir: (pkt[o + 10] >> 4) & 0x0f,
       pkLevel: pkt[o + 10] & 0x0f,
       created: (pkt[o] & 0x80) !== 0,
-      name,
+      name: readName(pkt, o + 11),
     });
   }
   return out;
@@ -1095,6 +1104,20 @@ export function buildNpcClosePacket(): Uint8Array {
  */
 export function buildViewportEnablePacket(): Uint8Array {
   return new Uint8Array([0xc1, 4, 0xf3, 0x12]);
+}
+
+/**
+ * 踩着传送门请求过图（`CGTeleportRecv`，`PMSG_TELEPORT_RECV`）。
+ *
+ * 包体 6 字节：`C1 06 1C [gate] 00 00`。`gate > 0` 是「走门」，
+ * `gate = 0` 是法师瞬移（此时后面的 x/y 才有意义，服务端会用
+ * `gObjCheckTeleportArea` 校验目标格）。
+ *
+ * 关键点：**服务端不会自己发现你踩到门**，必须由客户端发这个包
+ * （原版 `CheckGate` @ 0x004AC140 就是干这个的）。
+ */
+export function buildGateTeleportPacket(gate: number): Uint8Array {
+  return new Uint8Array([0xc1, 0x06, 0x1c, gate & 0xff, 0, 0]);
 }
 
 export interface NpcTalkReply {
@@ -2033,6 +2056,255 @@ export function parseMoveList(pkt: Uint8Array): MoveListEntry[] | null {
     });
   }
   return out;
+}
+
+/**
+ * 下行 `0xF3/0xE0` —— `PMSG_NEW_CHARACTER_INFO_SEND`（`Protocol.h:543`）。
+ *
+ * 只在服务端 `GAMESERVER_EXTRA == 1` 时发送（`stdafx.h:7` 就是 1），
+ * 结构是 4 字节头 + **18 个 DWORD**，比原版 0xF3/0x03 的 48 字节多出一大截：
+ *
+ *   Level, LevelUpPoint, Experience, NextExperience,
+ *   Strength, Dexterity, Vitality, Energy,
+ *   Life, MaxLife, Mana, MaxMana, BP, MaxBP,
+ *   FruitAddPoint, MaxFruitAddPoint,
+ *   **ViewReset, ViewGrandReset**
+ *
+ * 最后两个就是转生次数 —— 原版 0x03 包里没有，所以客户端一直把 `reset` 写死 0。
+ * 拿到它以后 `/move` 的「需要转生 N 次」门槛才能真的判断。
+ *
+ * 注意字段全是 4 字节（服务端用的 DWORD），不是 0x03 那种 WORD 混合布局。
+ */
+export interface CharacterExtraInfo {
+  level: number;
+  levelUpPoint: number;
+  experience: number;
+  nextExperience: number;
+  reset: number;
+  grandReset: number;
+}
+
+export function parseNewCharacterInfo(pkt: Uint8Array): CharacterExtraInfo | null {
+  if (pkt[0] !== 0xc1 && pkt[0] !== 0xc3 && pkt[0] !== 0xc4 && pkt[0] !== 0xc2) return null;
+  const base = pkt[0] === 0xc2 || pkt[0] === 0xc4 ? 3 : 2;
+  if (pkt[base] !== 0xf3 || pkt[base + 1] !== 0xe0) return null;
+
+  const p = base + 2;
+  // 18 个 DWORD：payload 72 字节
+  if (pkt.length < p + 72) return null;
+
+  return {
+    level: readU32(pkt, p + 0),
+    levelUpPoint: readU32(pkt, p + 4),
+    experience: readU32(pkt, p + 8),
+    nextExperience: readU32(pkt, p + 12),
+    reset: readU32(pkt, p + 64),
+    grandReset: readU32(pkt, p + 68),
+  };
+}
+
+/** 血条包里的一条：`{ WORD index, BYTE type, BYTE rateHP }` */
+export interface HealthBarEntry {
+  id: number;
+  /** 服务端 `lpTarget->Type`（0 = 玩家，非 0 = 怪物） */
+  type: number;
+  /** 血量百分比 0..100 */
+  rateHp: number;
+}
+
+/**
+ * 下行 `0xF3/0xE2` —— `GCHealthBarSend`（`Protocol.cpp:2236`）。
+ *
+ * 服务端定时遍历视野，只挑**怪物**（`VpPlayer[n].type == OBJECT_MONSTER`），
+ * 每条 4 字节：`WORD index`、`BYTE type`、`BYTE rateHP`。
+ *
+ * `rateHP = Life * 100 / (MaxLife + AddLife)` —— 是百分比，不是当前血量。
+ * 有了它就不用再靠「挨打时 `life + damage` 反推上限」这种猜法。
+ * 开关是 `m_MonsterHealthBarSwitch`，关掉就不发。
+ *
+ * 包头是 `PSWMSG_HEAD`（C2 sizeH sizeL code sub = 5 字节），和 C1 的 4 字节不同。
+ */
+export function parseHealthBar(pkt: Uint8Array): HealthBarEntry[] | null {
+  if (pkt[0] !== 0xc2 && pkt[0] !== 0xc4) return null;
+  if (pkt[3] !== 0xf3 || pkt[4] !== 0xe2) return null;
+  if (pkt.length < 6) return null;
+
+  const count = pkt[5];
+  const start = 6;
+  const STRIDE = 4;
+  if (pkt.length < start + count * STRIDE) return null;
+
+  const out: HealthBarEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    const o = start + i * STRIDE;
+    out.push({
+      id: pkt[o] | (pkt[o + 1] << 8),
+      type: pkt[o + 2],
+      rateHp: pkt[o + 3],
+    });
+  }
+  return out;
+}
+
+/** `0xF3/0x07` 解出来的「自己挨打」事件 */
+export interface MonsterDamage {
+  damage: number;
+  /** 打完之后自己的 HP（`ViewCurHP`），-1 = 包太短没带 */
+  curHp: number;
+}
+
+/**
+ * 下行 `0xF3/0x07` —— `GCMonsterDamageSend`（`Protocol.cpp:2046`）。
+ *
+ * **只发给被打的那一方自己**（`GCMonsterDamageSend(lpTarget->Index, damage)`，
+ * `ObjectManager.cpp:2926` 的 `DamageType == 1 // Delay Life Check` 分支）。
+ * 别人打谁走的是 `0x15`，那个包发给攻击者。
+ *
+ * 注意 `damage[2]` 是**大端**（`SET_NUMBERHB` 在前），而后面两个 DWORD 是小端 ——
+ * 同一个包里混着两种字节序，抄错就是几百倍的伤害数字。
+ */
+export function parseMonsterDamage(pkt: Uint8Array): MonsterDamage | null {
+  if (pkt[0] !== 0xc1 && pkt[0] !== 0xc3 && pkt[0] !== 0xc4 && pkt[0] !== 0xc2) return null;
+  const base = pkt[0] === 0xc2 || pkt[0] === 0xc4 ? 3 : 2;
+  if (pkt[base] !== 0xf3 || pkt[base + 1] !== 0x07) return null;
+
+  const p = base + 2;
+  if (pkt.length < p + 2) return null;
+  return {
+    damage: (pkt[p] << 8) | pkt[p + 1],
+    curHp: pkt.length >= p + 6 ? readU32(pkt, p + 2) : -1,
+  };
+}
+
+/** `0xF3/0x30` 的选项数据（`PMSG_OPTION_DATA_SEND`，`Protocol.h:514`） */
+export interface OptionData {
+  /**
+   * 10 个快捷键绑定的**技能号**，下标 i 对应快捷键 `i + 1`。
+   *
+   * 注意语义方向和客户端的 `skillHotkeys`（槽位 → 键位）**相反**：
+   * 服务端存的是「键位 → 技能」，所以落地时要反查技能槽。
+   * 空位可能是 0 或 0xFF（原版重绑定时用 0xFF 清空）。
+   */
+  skillKey: number[];
+  /** 游戏选项位（音效/音乐开关等，客户端暂未使用） */
+  gameOption: number;
+  qKey: number;
+  wKey: number;
+  eKey: number;
+  chatWindow: number;
+}
+
+/**
+ * 下行 `0xF3/0x30` —— 登录时由 DataServer 推的按键/选项存档（`DSProtocol.cpp:1030`）。
+ *
+ * 上行是同一个 head 的 `CGOptionDataRecv`（`Protocol.cpp:1451`），改键后回存数据库。
+ * 结构 `#pragma pack(1)`：`SkillKey[10] + GameOption + QKey + WKey + EKey + ChatWindow`
+ * = 15 字节 payload（总长 19），**不是** 4 字节对齐的 16。
+ */
+export function parseOptionData(pkt: Uint8Array): OptionData | null {
+  if (pkt[0] !== 0xc1 && pkt[0] !== 0xc3 && pkt[0] !== 0xc4 && pkt[0] !== 0xc2) return null;
+  const base = pkt[0] === 0xc2 || pkt[0] === 0xc4 ? 3 : 2;
+  if (pkt[base] !== 0xf3 || pkt[base + 1] !== 0x30) return null;
+
+  const p = base + 2;
+  if (pkt.length < p + 15) return null;
+
+  return {
+    skillKey: Array.from(pkt.subarray(p, p + 10)),
+    gameOption: pkt[p + 10],
+    qKey: pkt[p + 11],
+    wKey: pkt[p + 12],
+    eKey: pkt[p + 13],
+    chatWindow: pkt[p + 14],
+  };
+}
+
+/**
+ * 上行 `0xF3/0x30` —— 按键/选项存档回写（`CGOptionDataRecv`，`Protocol.cpp:1451`）。
+ *
+ * 服务端收到就转 `GDOptionDataSaveSend` 存数据库，下次登录再推回来 ——
+ * 也就是说**只读不写等于白读**：服务端存的还是旧键位，换机器照样丢。
+ */
+export function buildOptionDataPacket(opt: OptionData): Uint8Array {
+  const pkt = new Uint8Array(19);
+  pkt[0] = 0xc1;
+  pkt[1] = 19;
+  pkt[2] = 0xf3;
+  pkt[3] = 0x30;
+  for (let i = 0; i < 10; i++) pkt[4 + i] = opt.skillKey[i] ?? 0xff;
+  pkt[14] = opt.gameOption & 0xff;
+  pkt[15] = opt.qKey & 0xff;
+  pkt[16] = opt.wKey & 0xff;
+  pkt[17] = opt.eKey & 0xff;
+  pkt[18] = opt.chatWindow & 0xff;
+  return pkt;
+}
+
+/**
+ * 下行 `0xF3/0xE1` —— `PMSG_NEW_CHARACTER_CALC_SEND`（`Protocol.h:566`）。
+ *
+ * 这是**服务端算好的最终属性**：HP/MP/BP 的当前与上限、物理/魔法攻速、
+ * 物攻区间、魔攻区间、魔攻率、命中、伤害倍率、防御、防御率，一共 17 个 DWORD。
+ *
+ * 有它就不该再在客户端自己凑 `STR/6`、`AGI/3` 那套近似式了 —— 服务端已经把
+ * 强化、追加、卓越、套装、buff 全部算进去，而且**耐久磨损后的防御衰减**
+ * （`Item.cpp:624` 的 `m_Defense *= CurrentDurabilityState`）也在里面。
+ * 客户端本地算永远对不上这个值。
+ */
+export interface CharacterCalc {
+  curHp: number;
+  maxHp: number;
+  curMp: number;
+  maxMp: number;
+  curBp: number;
+  maxBp: number;
+  /** 物理攻速 */
+  physiSpeed: number;
+  /** 魔法攻速 */
+  magicSpeed: number;
+  physiDmgMin: number;
+  physiDmgMax: number;
+  magicDmgMin: number;
+  magicDmgMax: number;
+  /** 魔法攻击力加成率（%） */
+  magicDmgRate: number;
+  /** 命中率 */
+  attackSuccessRate: number;
+  /** 伤害倍率（%） */
+  damageMultiplier: number;
+  defense: number;
+  defenseSuccessRate: number;
+}
+
+export function parseCharacterCalc(pkt: Uint8Array): CharacterCalc | null {
+  if (pkt[0] !== 0xc1 && pkt[0] !== 0xc3 && pkt[0] !== 0xc4 && pkt[0] !== 0xc2) return null;
+  const base = pkt[0] === 0xc2 || pkt[0] === 0xc4 ? 3 : 2;
+  if (pkt[base] !== 0xf3 || pkt[base + 1] !== 0xe1) return null;
+
+  const p = base + 2;
+  // 17 个 DWORD：payload 68 字节
+  if (pkt.length < p + 68) return null;
+  const at = (i: number) => readU32(pkt, p + i * 4);
+
+  return {
+    curHp: at(0),
+    maxHp: at(1),
+    curMp: at(2),
+    maxMp: at(3),
+    curBp: at(4),
+    maxBp: at(5),
+    physiSpeed: at(6),
+    magicSpeed: at(7),
+    physiDmgMin: at(8),
+    physiDmgMax: at(9),
+    magicDmgMin: at(10),
+    magicDmgMax: at(11),
+    magicDmgRate: at(12),
+    attackSuccessRate: at(13),
+    damageMultiplier: at(14),
+    defense: at(15),
+    defenseSuccessRate: at(16),
+  };
 }
 
 export function parseEventTime(pkt: Uint8Array): EventTimeEntry[] | null {

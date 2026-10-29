@@ -25,6 +25,7 @@
  *      选第二组（偏移 +6 行）。本 port 用 `isMagicGladiator` 显式传进来。
  */
 
+import { sfxError } from '../audio/sound';
 import { UiLayer } from './frame';
 import { textSync } from '../data/localText';
 import { preloadUi, uiSprite } from './ozj';
@@ -276,7 +277,8 @@ export class EventPanel {
     this.toastEl.classList.add('hidden');
   }
 
-  toast(text: string, tone: 'ok' | 'error' = 'ok') {
+    toast(text: string, tone: 'ok' | 'error' = 'ok') {
+    if (tone === 'error') sfxError();
     this.toastEl.textContent = text;
     this.toastEl.className = `npc-toast ${tone === 'error' ? 'npc-toast-error' : 'npc-toast-ok'}`;
     window.clearTimeout(this.toastTimer);

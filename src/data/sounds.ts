@@ -12,10 +12,16 @@
  *   3. `pos3d` = `Enable3DSound[id]`：原版用 DirectSound3D 按**施法者/受击者坐标**
  *      做方位和距离衰减，所以别人的脚步声/怪物叫声是有位置的。
  *
- * ⚠️ 原版界面上那声「叮」（按钮、开面板）走的是 `PlayBuffer(0x19)` / `(0x1C)`，
- * 而这两个 id **没有被加载**（表里 0x18/0x19/0x1A/0x1B 全空）——
- * `PlayBuffer` 拿到空 buffer 直接 `E_FAIL`，也就是**原版这声本来就是哑的**。
- * 之前有人以为是漏了音效，其实是官方行为，这里保持不放。
+ * ⚠️ 这里以前写着「界面那声『叮』（0x19/0x1C）原版就是哑的」——**那是错的**。
+ *
+ * 原版有**两个**音效加载器，`OpenSounds` 只管游戏内那批：
+ *
+ *   - `Sound_LoadGameSamples`（`Model/Model_Gates.cpp`）→ 环境/脚步/打击/技能/怪物
+ *   - `OpenBasicData` 尾部（`Scene/Scene_AssetLoad.cpp:159-166`）→ **界面音效 7 条**
+ *
+ * 第二个在 `src/Scene/` 下，当初只翻了 `Model_Gates.cpp` 就下了结论，于是
+ * 0x04/0x19/0x1A/0x1B/0x1C/0x25/0x26 一直被当成「空槽」。
+ * 现在补在表尾的「界面音效」段里，id 与文件名照抄 `Scene_AssetLoad.cpp`。
  */
 
 export interface SoundDef {
@@ -151,6 +157,21 @@ export const SOUNDS: SoundDef[] = [
   /* ── NPC（`NPC_ModelLoad.cpp`，按 NPC 类型加载到固定槽） ─────── */
   { id: 0x78, file: 'nBlackSmith.wav', channels: 1, pos3d: false, note: '铁匠' },
   { id: 0x79, file: 'nMix.wav', channels: 1, pos3d: false, note: '合成机' },
+
+  /*
+   * ── 界面音效（另一张表：`Scene/Scene_AssetLoad.cpp:159-166`）─────
+   *
+   * 这 7 条**不在** `Sound_LoadGameSamples` 里，所以先前按一张表对账时全被
+   * 当成「空槽」。原版 `OpenBasicData` 在读数据的同一段里顺手加载，早于
+   * 任何界面出现，因此 `PlayBuffer(0x19)` 之类是**真的有声**。
+   */
+  { id: 0x04, file: 'iTitle.wav', channels: 1, pos3d: false, note: '标题画面' },
+  { id: 0x19, file: 'iButtonClick.wav', channels: 1, pos3d: false, note: '按钮点击' },
+  { id: 0x1a, file: 'iButtonError.wav', channels: 1, pos3d: false, note: '按钮错误/不可用' },
+  { id: 0x1b, file: 'iButtonMove.wav', channels: 2, pos3d: false, note: '按钮悬停' },
+  { id: 0x1c, file: 'iCreateWindow.wav', channels: 1, pos3d: false, note: '打开窗口' },
+  { id: 0x25, file: 'iRepair.wav', channels: 1, pos3d: false, note: '修理' },
+  { id: 0x26, file: 'iWhisper.wav', channels: 1, pos3d: false, note: '悄悄话提示' },
 ];
 
 /** id → 定义 */

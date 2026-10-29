@@ -5,6 +5,8 @@ dist/assets/
 dist/index.html
 dist/404.html
 dist/server/
+dist/_headers
+dist/_redirects
 dist-verify/
 .tmp/
 

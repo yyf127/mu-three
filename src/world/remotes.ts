@@ -19,6 +19,8 @@ import {
   type EquipSet,
 } from './actor';
 import { decodeCharSet } from '../data/charSet';
+import { monsterSoundSet } from '../data/monsterSounds';
+import { sfxFile } from '../audio/sound';
 import { MONSTER_ACTION } from './monsterModels';
 import type { TerrainMesh } from './terrain';
 import {
@@ -36,6 +38,7 @@ import {
   parseViewportPlayers,
   parseViewportSummons,
   yawFromDir,
+  type HealthBarEntry,
   type ViewportChange,
   type ViewportMonster,
   type ViewportPlayer,
@@ -54,6 +57,13 @@ export interface RemoteEntity {
   /** 血量（服务端伤害包里带 ViewCurHP） */
   life: number;
   maxLife: number;
+  /**
+   * 精确血量百分比 0..100（`0xF3/0xE2` 血条包），-1 = 还没收到。
+   *
+   * 服务端每秒给视野内**所有怪物**推一次，值是 `Life*100/(MaxLife+AddLife)`。
+   * 有它就不用再玩「`life + damage` 反推上限」那套猜法了。
+   */
+  hpRate: number;
   /** 死亡中：播完倒地动作后自动移除 */
   dying: boolean;
   dieTimer: number;
@@ -146,6 +156,8 @@ export class RemoteManager {
   onSkillState: ((id: number, mask: number) => void) | null = null;
   /** 实体离开视野（0x14）：身上的 buff 视觉要一起删 */
   onEntityGone: ((id: number) => void) | null = null;
+  /** 战盟信息落到「自己」身上时（本地玩家不在 `entities` 里，得转给 main） */
+  onSelfGuild: ((mark: Uint8Array | null, name: string) => void) | null = null;
 
   /** 调试：最近一次解析结果 */
   debug = {
@@ -191,6 +203,8 @@ export class RemoteManager {
       cls: e.cls,
       hp: e.life,
       maxHp: e.maxLife,
+      /** 精确百分比（`0xF3/0xE2`），-1 = 没有 */
+      hpRate: e.hpRate,
       dying: e.dying,
       // 世界坐标（格心，已经带 +0.5）：给标签/特效/投影用，和 three 里的真实位置一致
       x: +e.actor.wx.toFixed(2),
@@ -347,17 +361,22 @@ export class RemoteManager {
 
   /** 按 id 取实体（用于攻击判定 / HUD） */
   /**
-   * 0x5C / 0x5D：给某个远端实体挂上 / 清掉战盟信息。
+   * 0x5A / 0x5C：给某个远端实体挂上 / 清掉战盟信息。
    *
-   * 0.97 里这对应「别人进视野时服务端补发 0x5C」，客户端用它在头顶画盟名
-   * 和标志。本 port 先把数据收下来（`state().remotes[].guild`），
-   * 3D 标志贴图那一层还没做。
+   * 0.97 里这对应「别人进视野时服务端补发 0x5C」，客户端用它在盾牌骨骼上
+   * 画那块 8×8 的盟标（`RenderGuildMarkOnShield`）。自己那条走
+   * `onSelfGuild` 回调 —— 本地玩家不在 `entities` 里。
    */
   setGuild(id: number, name: string, mark?: Uint8Array) {
     const e = this.entities.get(id);
-    if (!e) return false;
+    if (!e) {
+      // 自己：主角色是 main.ts 的 `player`，这里只把标志转发出去
+      if (id === this.selfId) this.onSelfGuild?.(mark ? mark.slice() : null, name);
+      return false;
+    }
     e.guildName = name;
     if (mark) e.guildMark = mark.slice();
+    e.actor.setGuildMark(mark ?? null);
     this.notify();
     return true;
   }
@@ -510,11 +529,50 @@ export class RemoteManager {
     } else {
       // 怪物动作组是 0..5，服务端广播的是玩家编号，只区分「是不是攻击」
       e.actor.play(isPlayerAttack(action) ? MONSTER_ACTION.ATTACK1 : MONSTER_ACTION.STOP, false);
+      if (isPlayerAttack(action)) this.monsterVoice(e, 'attack');
     }
   }
 
-  private applyDamage(targetId: number, damage: number, type: number, life: number, flag: boolean) {
-    this.debug.lastDamage = { dmg: damage, life };
+  /**
+   * 放一声怪物音（`m<Type>1/2`、`m<Type>Attack1/2`、`m<Type>Die`）。
+   *
+   * 原版在 `Render_PlayerHelper` 那种「跟着实体」的位置 `PlayBuffer`，音效是
+   * 3D 的（`Enable3DSound=1`），所以这里带上实体坐标让 `sfxFile` 做距离衰减 +
+   * 左右声道 —— 远处怪打架时听到的是模糊的方位感，不是满音量糊脸。
+   *
+   * 表覆盖 `Class 0..59`（`Monster_Data.cpp` 只给这 60 个 type 挂了音）；
+   * 60 以上那些是这份服务端数据额外的怪，原版本来也没有音，静音是对的。
+   */
+  private monsterVoice(e: RemoteEntity, slot: 'idle' | 'attack' | 'die') {
+    const set = monsterSoundSet(e.cls);
+    if (!set) return;
+    const pool =
+      slot === 'die' ? (set.die ? [set.die] : []) : slot === 'attack' ? set.attack : set.idle;
+    if (!pool.length) return;
+    const file = pool[Math.floor(Math.random() * pool.length)];
+    sfxFile(file, { x: e.actor.x, y: e.actor.y });
+  }
+
+  /**
+   * `0xF3/0xE2` 血条包：批量更新视野内怪物的血量百分比。
+   *
+   * 百分比和「当前血量」一起用，就能反推出真实上限 ——
+   * `maxLife = life * 100 / rateHp`，比 `applyDamage` 里
+   * 「life + damage」的估法准得多（那个只在挨打那一刻成立，遇到回血就偏）。
+   */
+  applyHealthBars(list: HealthBarEntry[]) {
+    for (const h of list) {
+      const e = this.entities.get(h.id);
+      if (!e) continue;
+      e.hpRate = h.rateHp;
+      if (e.life > 0 && h.rateHp > 0) {
+        const max = Math.round((e.life * 100) / h.rateHp);
+        if (max > e.maxLife) e.maxLife = max;
+      }
+    }
+  }
+
+  private applyDamage(targetId: number, damage: number, type: number, life: number, flag: boolean) {    this.debug.lastDamage = { dmg: damage, life };
     if (targetId === this.selfId) {
       // 服务端把「自己挨打」也发回来（GCDamageSend 会给两端各发一份）
       this.onSelfDamage?.(damage, life);
@@ -582,6 +640,7 @@ export class RemoteManager {
 
     const dieAction = e.kind === 'player' ? 12 : MONSTER_ACTION.DIE;
     if (e.actor.rig.bmd.actions[dieAction]) e.actor.play(dieAction, false);
+    if (e.kind === 'monster') this.monsterVoice(e, 'die');
 
     if (experience > 0) {
       this.debug.lastDieExp = experience;
@@ -642,6 +701,7 @@ export class RemoteManager {
         ty: p.ty || p.y,
         life: 0,
         maxLife: 0,
+        hpRate: -1,
         dying: false,
         dieTimer: 0,
         equip: this.equipFromCharSet(p.charSet),
@@ -700,6 +760,7 @@ export class RemoteManager {
         ty: m.ty || m.y,
         life: 0,
         maxLife: 0,
+        hpRate: -1,
         dying: false,
         dieTimer: 0,
         equip: new Array(12).fill(-1),
@@ -752,6 +813,8 @@ export class RemoteManager {
       gloves: at(5),
       boots: at(6),
       wing: at(7),
+      // 槽 8 = 守护；`CharSet[11]` 里第 9 个字节就是它，能看到别人带的宠物
+      helper: at(8),
       // 远程玩家不知道职业位时退回 0（男）；CharSet 里其实有，但只是粗略位
       cls: e.cls >= 0 ? e.cls : 0,
     };
@@ -902,6 +965,7 @@ export class RemoteManager {
 
   private remove(id: number) {
     this.blockerMap.delete(id);
+    this.voiceAt.delete(id);
     // 离开视野 → 身上的 buff 视觉一起消失（原版实体被删，特效跟着 owner 走）
     this.onEntityGone?.(id);
     const e = this.entities.get(id);
@@ -950,8 +1014,21 @@ export class RemoteManager {
 
       a.z = terrain.getHeight(a.x, a.y);
       a.update(dt);
+
+      // 待机叫声：原版是每隔几秒随机叫一声（两个变体），这里同样按实体错峰
+      if (e.kind === 'monster') {
+        const due = this.voiceAt.get(e.id) ?? 0;
+        const now = performance.now() / 1000;
+        if (now >= due) {
+          this.monsterVoice(e, 'idle');
+          this.voiceAt.set(e.id, now + 6 + Math.random() * 8);
+        }
+      }
     }
   }
+
+  /** 每个怪下一次「待机叫」的时间点（错峰，免得一群怪齐声） */
+  private voiceAt = new Map<number, number>();
 }
 
 /** 动作组不足时退回第 0 组，避免 Frame 取到 undefined */

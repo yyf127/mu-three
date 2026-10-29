@@ -18,6 +18,7 @@
  */
 import type { MuConnection } from './connection';
 import { encodeServerText } from './text';
+import { buildOptionDataPacket, type OptionData } from './game';
 
 export const LoginResult: Record<number, string> = {
   0: '账号或密码错误',
@@ -329,6 +330,16 @@ export class MuSession {
    */
   sendAddPoint(stat: number) {
     this.conn.send(buildPacket(0xc1, 0xf3, 0x06, new Uint8Array([stat & 3])));
+  }
+
+  /**
+   * 按键/选项存档回写（`0xF3/0x30`，`CGOptionDataRecv`）。
+   *
+   * 服务端会转 `GDOptionDataSaveSend` 存库，下次登录再推回来 ——
+   * 不上报的话改的键位只留在本机 localStorage，换台机器就丢了。
+   */
+  sendOptionData(opt: OptionData) {
+    this.conn.send(buildOptionDataPacket(opt));
   }
 
   /**

@@ -96,6 +96,14 @@ export class EscMenu {
   onJoinChar: (() => void) | null = null;
   /** 选角菜单的「返回线路选择」 */
   onBackToServer: (() => void) | null = null;
+  /**
+   * 两个开关被改时触发（原版 `SaveOptionsToServer97k`）。
+   *
+   * 这两个值**存在服务端**的 `GameOption` 字节里（`0xF3/0x30` 的 +14）：
+   * `bit0=1` 自动攻击开、`bit1=1` 关；`bit2=1` 悄悄话音开、`bit3=1` 关。
+   * 不回写的话换台机器/重登就回到默认，和原版行为不一致。
+   */
+  onOptions: ((autoAttack: boolean, whisperSound: boolean) => void) | null = null;
 
   constructor(host: HTMLElement) {
     this.root = document.createElement('div');
@@ -162,6 +170,7 @@ export class EscMenu {
         () => {
           this.autoAttack = !this.autoAttack;
           this.paintLabels();
+          this.onOptions?.(this.autoAttack, this.whisperSound);
         },
         false,
         () => `${textSync(386, '自动攻击')}  ${this.autoAttack ? 'On' : 'Off'}`
@@ -173,6 +182,7 @@ export class EscMenu {
         () => {
           this.whisperSound = !this.whisperSound;
           this.paintLabels();
+          this.onOptions?.(this.autoAttack, this.whisperSound);
         },
         false,
         () => `${textSync(387, '悄悄话提示音')}  ${this.whisperSound ? 'On' : 'Off'}`
@@ -238,6 +248,19 @@ export class EscMenu {
       if (b.dynamic || b.textId === null) continue;
       b.label.textContent = textSync(b.textId, b.fallback);
     }
+    this.paintLabels();
+  }
+
+  /**
+   * 从服务端的 `GameOption` 还原两个开关（进游戏收到 `0xF3/0x30` 时调）。
+   *
+   * 位定义见 `UI_InGameMenu.cpp:89-90`：**不是「置位=开」**，而是
+   * `bit0 ? 开 : bit1`、`bit2 ? 开 : bit3` —— 所以只能判 `& 1` / `& 4`，
+   * 直接判 `!= 0` 会把「关」当成「开」（关时字节是 0x0A）。
+   */
+  setOptions(autoAttack: boolean, whisperSound: boolean) {
+    this.autoAttack = autoAttack;
+    this.whisperSound = whisperSound;
     this.paintLabels();
   }
 

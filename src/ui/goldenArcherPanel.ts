@@ -23,6 +23,7 @@
  *   - **幸运号码是 12 位字母数字**（`GlobalText[907]` 的例子是
  *     `AUS919DKL2J9`），不是纯数字；显示成 `xxxx - xxxx - xxxx`。
  */
+import { sfxError } from '../audio/sound';
 import type { UiLayer } from './frame';
 import { textSync } from '../data/localText';
 import { uiSprite } from './ozj';
@@ -263,7 +264,8 @@ export class GoldenArcherPanel {
     this.paint();
   }
 
-  toast(text: string, kind: 'ok' | 'error' = 'ok') {
+    toast(text: string, kind: 'ok' | 'error' = 'ok') {
+    if (kind === 'error') sfxError();
     this.toastEl.textContent = text;
     this.toastEl.className = `ga-toast ${kind}`;
     window.clearTimeout(this.toastTimer);

@@ -6,7 +6,8 @@
  *
  * 四层：
  *
- *   1. **表**：`Sound_LoadGameSamples`（客户端 `Model_Gates.cpp`）抄过来的 91 条，
+ *   1. **表**：`Sound_LoadGameSamples`（`Model_Gates.cpp`，91 条）**加上**
+ *      `OpenBasicData` 尾部的界面音效（`Scene_AssetLoad.cpp:159-166`，7 条）= 98 条，
  *      每个文件名都要在 `Data/Sound/` 下真的存在（HTTP 200），id 不重复且在 0..419。
  *   2. **技能映射**：`SKILL_SOUND` 里每个音效号都必须能在表里找到（写错就是静音）。
  *   3. **播放语义**：解码 → `played` 计数；通道上限（`channels`）会丢第三次；
@@ -42,7 +43,7 @@ try {
   console.log('[A] 音效表 / 文件存在性');
   const table = JSON.parse(await c.ev('__MU_APP__.audioTable().then(t => JSON.stringify(t))'));
   console.log(`  ${table.length} 条`);
-  check('条数 = 91（和 Sound_LoadGameSamples 一致）', table.length === 91, String(table.length));
+  check('条数 = 98（游戏 91 + 界面 7）', table.length === 98, String(table.length));
   check('id 不重复', new Set(table.map(s => s.id)).size === table.length);
   check('id 都在 0..419（g_lpDSBuffer[420]）', table.every(s => s.id >= 0 && s.id < 420));
 
@@ -75,7 +76,7 @@ try {
     const res = await fetch(url, { method: 'HEAD' });
     if (!res.ok) missing.push(`${s.id}:${s.file}`);
   }
-  check('全部文件 HTTP 200', missing.length === 0, missing.join(', ') || '91/91');
+  check('全部文件 HTTP 200', missing.length === 0, missing.join(', ') || `${table.length}/${table.length}`);
 
   /* ================= B. 技能 → 音效 ================= */
   console.log('\n[B] 技能号 → 音效号');

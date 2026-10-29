@@ -41,10 +41,10 @@
  */
 import { uiSprite, preloadUi } from './ozj';
 import { UiLayer, spriteBox } from './frame';
-import { itemAttr } from '../data/itemAttrs';
+import { itemPower } from '../data/itemPower';
 import { loadTextPool, type TextPool } from '../data/localText';
 import type { CharacterInfo } from '../net/session';
-import type { InventoryItem } from '../net/game';
+import type { InventoryItem, CharacterCalc } from '../net/game';
 
 /** 面板原点：和背包一样写死 450（640 - 190） */
 const PANEL_X = 450;
@@ -138,6 +138,16 @@ export class CharacterPanel {
   /** 当前渲染用的数据；`setInfo` 之前是 null，面板显示占位 */
   private info: CharacterInfo | null = null;
   private charName = '';
+  /** 转生次数（`0xF3/0xE0` 的 `ViewReset`） */
+  private reset = 0;
+  /**
+   * 服务端算好的最终属性（`0xF3/0xE1`）。
+   *
+   * 有它就用它的攻击/防御/防御率，本地那套 `STR/6`、`AGI/3` 只是**还没收到时**
+   * 的回退 —— 服务端把强化、追加、卓越、套装、buff、耐久衰减全算进去了，
+   * 客户端自己算永远对不上。
+   */
+  private calc: CharacterCalc | null = null;
   private charLevel = 0;
   private charClass = 0;
   /** 装备槽 0..11 的物品（服务端槽位语义），用来算攻防加成 */
@@ -308,14 +318,30 @@ export class CharacterPanel {
     level: number,
     charClass: number,
     info: CharacterInfo | null,
-    equipped: InventoryItem[] = []
+    equipped: InventoryItem[] = [],
+    /** 转生次数（`0xF3/0xE0` 的 `ViewReset`）。0.97 原版面板没有这一项，放名字后面 */
+    reset = 0
   ) {
     this.charName = name;
     this.charLevel = level;
     this.charClass = charClass;
     this.info = info;
     this.equipped = equipped;
+    this.reset = reset;
     this.paint();
+  }
+
+  /** 调试：当前各行显示的文字（行 id → 文本），探针断言用 */
+  snapshot(): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [id, el] of this.rows) out[id] = el.textContent ?? '';
+    return out;
+  }
+
+  /** 服务端属性计算包（`0xF3/0xE1`）。传 null 退回本地近似 */
+  setCalc(calc: CharacterCalc | null) {
+    this.calc = calc;
+    if (this.open) this.paint();
   }
 
   private setText(id: string, text: string) {
@@ -346,35 +372,37 @@ export class CharacterPanel {
      * CA+60/62（伤害区间）、CA+68（防御）、CA+56（防御率）—— 这些字段是
      * 客户端自己算的，服务端 0xF3/0x03 的 48 字节里并没有。
      *
-     * 这里按 0.97 的经典派生式 + 装备基础值算：
-     *   攻击 = STR/6 ～ STR/4，再加左右手武器的基础 DamageMin/Max
-     *   防御 = AGI/3 + 所有防具的基础 Defense
-     *   防御率 = AGI * 1.2
-     * 装备强化（+N）按 每级 3% 折算 —— 原版 `Damage*（100+3*level)/100`。
-     * 追加属性、卓越、套装加成都没算，所以这三行只是**近似值**，
-     * 真值要等之后接完整属性计算链。
+     * 这里按 0.97 的经典派生式 + 装备**实际数值**算：
+     *   攻击 = STR/6 ～ STR/4，再加左右手武器的 DamageMin/Max
+     *   防御 = AGI/3 + 所有防具的 Defense
+     *   防御率 = AGI * 1.2 + 装备的 DefRate
+     *
+     * 装备数值走 `itemPower(type, level)` —— 就是服务端 `CItem::Convert`
+     * 的强化公式（固定加值 + +10 以后的三角补偿），不再是「每级 3%」的近似。
+     * 追加属性、卓越、套装加成仍未接，所以这三行是**不含卓越的裸值**。
      */
     const str = info.strength;
     const agi = info.dexterity;
+    const calc = this.calc;
 
     let wMin = 0;
     let wMax = 0;
     let wDef = 0;
+    let wRate = 0;
     for (const it of this.equipped) {
-      const a = itemAttr(it.type);
-      // 强化等级：每 +1 约 3%（0.97 的 `LevelConvert` 就是这个量级）
-      const mul = (100 + 3 * Math.max(0, it.level | 0)) / 100;
+      const p = itemPower(it.type, it);
       if (it.slot === 0 || it.slot === 1) {
-        wMin += Math.round(a.dmgMin * mul);
-        wMax += Math.round(a.dmgMax * mul);
+        wMin += p.dmgMin + p.addDmg;
+        wMax += p.dmgMax + p.addDmg;
       }
-      wDef += Math.round(a.def * mul);
+      wDef += p.def + p.addDef;
+      wRate += p.defRate + p.addDefRate;
     }
 
-    const dmgMin = Math.floor(str / 6) + wMin;
-    const dmgMax = Math.floor(str / 4) + wMax;
-    const defBase = Math.floor(agi / 3) + wDef;
-    const defRate = Math.floor(agi * 1.2);
+    const dmgMin = calc ? calc.physiDmgMin : Math.floor(str / 6) + wMin;
+    const dmgMax = calc ? calc.physiDmgMax : Math.floor(str / 4) + wMax;
+    const defBase = calc ? calc.defense : Math.floor(agi / 3) + wDef;
+    const defRate = calc ? calc.defenseSuccessRate : Math.floor(agi * 1.2) + wRate;
 
     /*
      * 文案全部按原版索引从 Text.bmd 取（`RenderCharacterInfoWindow` 的
@@ -401,18 +429,26 @@ export class CharacterPanel {
     this.setText('defense', t.fmt(209, defBase));
     this.setText('defrate', t.fmt(67, defRate));
     this.setText('vitality', t.fmt(210, info.vitality));
-    this.setText('life', t.fmt(211, info.life, info.maxLife));
+    // HP/MP 也优先用 E1 的当前值（0x03 包只在登录时给一次，之后靠 0x26 同步）
+    this.setText('life', t.fmt(211, calc ? calc.curHp : info.life, calc ? calc.maxHp : info.maxLife));
     this.setText('energy', t.fmt(212, info.energy));
-    this.setText('mana', t.fmt(213, info.mana, info.maxMana));
+    this.setText(
+      'mana',
+      t.fmt(213, calc ? calc.curMp : info.mana, calc ? calc.maxMp : info.maxMana)
+    );
     // 魔法伤害只对法系（DW=0 / MG=3）有意义，和原版 classFlag 判定一致
     this.setText(
       'magic',
-      this.charClass === 0 || this.charClass === 3 ? t.fmt(216, 0, 0) : ''
+      this.charClass === 0 || this.charClass === 3
+        ? t.fmt(216, calc ? calc.magicDmgMin : 0, calc ? calc.magicDmgMax : 0)
+        : ''
     );
 
     const pts = info.levelUpPoint;
     this.setText('points', pts > 0 ? t.fmt(217, pts) : '');
-    this.setText('reset', t.fmt(199, 0, 0));
+    // 这一行原来填的是 `GlobalText[199]`（剩余点数），和上面的 points 行重复；
+    // 转生次数现在能从 0xF3/0xE0 拿到，正好占这个位置
+    this.setText('reset', this.reset > 0 ? `转生: ${this.reset}` : '');
 
     this.plusEls.forEach(el => (el.style.display = pts > 0 ? '' : 'none'));
   }

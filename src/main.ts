@@ -26,8 +26,11 @@ import {
   BACK_FLIP,
   setWingPose,
   applyWingPose,
+  setHelperPose,
+  HELPER_POSE,
   type EquipSet,
 } from './world/actor';
+import { tickItemGlow } from './world/itemGlow';
 import {
   attackAction,
   idleAction,
@@ -62,6 +65,7 @@ import {
   buildMovePacket,
   buildNpcClosePacket,
   buildViewportEnablePacket,
+  buildGateTeleportPacket,
   buildNpcTalkPacket,
   buildRepairPacket,
   REPAIR_ALL_SLOT,
@@ -79,6 +83,12 @@ import {
   parseItemList,
   parseItemModify,
   parseEventTime,
+  parseNewCharacterInfo,
+  parseCharacterCalc,
+  parseHealthBar,
+  parseOptionData,
+  parseMonsterDamage,
+  type OptionData,
   parseQuestInfo,
   parseQuestResult,
   parseQuestReward,
@@ -197,7 +207,7 @@ import {
   type InventoryItem,
   type SkillCastEvent,
 } from './net/game';
-import { DamageTexts } from './ui/damageText';
+import { DamageTexts, damageClassOf } from './ui/damageText';
 import { WorldTags, type TagItem } from './ui/worldTags';
 import { EscMenu } from './ui/escMenu';
 import { monsterMaxLifeOf, monsterNameOf } from './data/monsters';
@@ -250,6 +260,8 @@ import {
   setMuted,
   setSceneAudio,
   sfx,
+  sfxClick,
+  sfxOpenWindow,
   sfxRandom,
   toggleMuted,
   unlockAudio,
@@ -298,6 +310,7 @@ import { loadSkyTexture } from './core/texture';
 import { installDebugApi } from './debug';
 import { TILE_NAMES, getMapDefinition, mapWorldDir } from './world/maps';
 import { warpTable, syncWarpTable, applyServerMoveList, type WarpEntry } from './world/warp';
+import { checkWalkGate } from './world/gates';
 import { bridgeUrls, loadNetKeys, MuConnection, NetKeys } from './net/connection';
 import { MuSession, LoginResult, CharacterSummary, CharacterInfo } from './net/session';
 import { decodeServerText, encodeServerText, textCodecInfo } from './net/text';
@@ -736,6 +749,24 @@ void loadTextPool();
  */
 const uiLayer = new UiLayer(stageEl);
 
+/*
+ * 界面「叮」声（`PlayBuffer(0x19)` = `iButtonClick.wav`）。
+ *
+ * 原版 `CUIManager` 在每个按钮的按下分支里统一播这一声，所以这里用**一个**
+ * 委托监听覆盖全部 HTML 按钮，而不是给几十个面板挨个加。
+ * 用 `pointerdown` 而不是 `click`：原版是按下即响，不等抬起。
+ */
+document.addEventListener(
+  'pointerdown',
+  e => {
+    const t = e.target as Element | null;
+    if (!t || !t.closest) return;
+    // 只认真正的按钮与仓库/背包那种可点格子，别把拖拽、画布点击也响了
+    if (t.closest('button, .inv-cell, .skill-slot, .npc-row')) sfxClick();
+  },
+  true
+);
+
 /**
  * ESC 菜单（原版 `UI_StatsPanel.cpp` state 0x6e）+「选项」子菜单（0x96）。
  *
@@ -753,6 +784,12 @@ escMenu.onJoinServer = () =>
 escMenu.onJoinChar = () => leaveGame('charselect', 1, '');
 /** 选角那套精简菜单的「返回线路选择」 */
 escMenu.onBackToServer = () => leaveGame('login', 2, '已返回线路选择');
+/*
+ * 选项改动立刻回写服务端（原版 `SaveOptionsToServer97k`）——
+ * 不然换台机器登录，自动攻击/提示音又回到默认值。
+ * 离线沙盘没有 session，`sendOptionData` 自己会返回，不用额外判断。
+ */
+escMenu.onOptions = () => sendOptionData();
 // 菜单在 Text.bmd 读完之前就构造好了，表到位后补一次文案（否则是硬编码兜底串）
 void loadTextPool().then(() => escMenu.refreshText());
 
@@ -861,10 +898,47 @@ skillBar.onSelect = slot => {
 skillBar.onHotkey = (slot, key) => {
   skillHotkeys.set(slot, key);
   saveSkillHotkeys();
+  // 只存本地等于白改：服务端那份不更新，换机器照样丢
+  sendOptionData();
 };
 skillBar.onToggle = open => {
   console.log(`[skill] 技能栏${open ? '展开' : '收起'}`);
 };
+
+/**
+ * 最近一次收到的 `0xF3/0x30` 原始数据。
+ *
+ * 上行时用它打底：`GameOption` / `Q W E` / `ChatWindow` 客户端都没实现，
+ * 直接发 0 会把玩家存在服务端的音效设置、药水槽一起清掉。
+ */
+let serverOption: OptionData | null = null;
+
+/**
+ * 把「槽位 → 键位」映射回服务端的「键位 → 技能号」，连同 ESC 选项一起上报。
+ *
+ * `GameOption` 的两位开关（`UI_InGameMenu.cpp:89-90`）：
+ *
+ *     bit0 = 1 自动攻击开 / bit1 = 1 关
+ *     bit2 = 1 悄悄话提示音开 / bit3 = 1 关
+ *
+ * **必须原样保留 `qKey/wKey/eKey/chatWindow`** —— 客户端没有药水槽与聊天窗
+ * 设置界面，发 0 会把玩家存在服务端的这两项清掉。
+ */
+function sendOptionData() {
+  if (!session || !currentChar) return;
+  const skillKey = new Array(10).fill(0xff);
+  for (const [slot, key] of skillHotkeys) {
+    const entry = skillList.find(s => s.slot === slot);
+    if (entry && key >= 1 && key <= 10) skillKey[key - 1] = entry.skill & 0xff;
+  }
+  const base: OptionData =
+    serverOption ?? { skillKey, gameOption: 0, qKey: 0, wKey: 0, eKey: 0, chatWindow: 0 };
+  const gameOption =
+    (escMenu.autoAttack ? 0x01 : 0x02) | (escMenu.whisperSound ? 0x04 : 0x08);
+  const opt: OptionData = { ...base, skillKey, gameOption };
+  session.sendOptionData(opt);
+  serverOption = opt;
+}
 
 /** 把 `skillList` + `skill.bmd` 的元数据拼成面板用的条目 */
 function syncSkillBar() {
@@ -875,6 +949,38 @@ function syncSkillBar() {
       return { slot: s.slot, skill: s.skill, level: s.level, name: meta?.name, mana: meta?.mana };
     });
   skillBar.setSkills(entries);
+  // 技能表和键位存档谁先到不确定，谁后到谁负责合一次
+  applyPendingHotkeys();
+}
+
+/**
+ * 服务端下发的键位存档（`0xF3/0x30` 的 `SkillKey[10]`）。
+ *
+ * 方向和客户端内部相反：服务端是「**键位 → 技能号**」（下标 i = 快捷键 i+1），
+ * 客户端 `skillHotkeys` 是「槽位 → 键位」。所以落地时要拿技能号反查槽位。
+ *
+ * 存档可能比技能列表先到，先存着，等 `syncSkillBar()` 再合。
+ * 全空（新角色从没存过）时**不动**本地 localStorage 的键位，否则会把玩家
+ * 自己配的键位清掉。
+ */
+let pendingHotkeys: number[] | null = null;
+
+function applyPendingHotkeys() {
+  if (!pendingHotkeys || !skillList.length) return;
+  const map = new Map<number, number>();
+  pendingHotkeys.forEach((skillId, i) => {
+    // 0 和 0xFF 都是「空」（原版重绑定时用 0xFF 抹掉旧键）
+    if (!skillId || skillId === 0xff) return;
+    const entry = skillList.find(s => s.skill === skillId);
+    if (entry) map.set(entry.slot, i + 1);
+  });
+  pendingHotkeys = null;
+  if (!map.size) return; // 服务端没存过 → 保留本地
+  skillHotkeys.clear();
+  for (const [slot, key] of map) skillHotkeys.set(slot, key);
+  skillBar.setHotkeys(skillHotkeys);
+  saveSkillHotkeys();
+  console.log(`[skill] 服务端键位已载入：${map.size} 个`);
 }
 
 async function ensureSkillTable() {
@@ -1447,6 +1553,7 @@ async function toggleQuestPanel() {
   }
   try {
     await ensureQuestData();
+    sfxOpenWindow();
     questPanel.show();
     console.log(`[quest] 窗口打开：${questData?.quests.length ?? 0} 个任务`);
   } catch (e) {
@@ -1585,6 +1692,7 @@ function togglePartyPanel() {
   if (guildPanel.isOpen) guildPanel.hide();
   if (eventPanel.isOpen) closeEventWindow();
 
+  sfxOpenWindow();
   refreshNearbyPlayers();
   partyPanel.setSelf(currentChar?.name ?? '');
   partyPanel.show();
@@ -1811,14 +1919,19 @@ function syncMinimap() {
  *   4. **NPC 不画**（原版明确排除）。
  */
 function syncWorldTags() {
-  if (!loggedIn || !currentChar || !world) {
+  /*
+   * 离线沙盘（`currentChar` 为空）也画标签：怪物/NPC 的名字与血条本来就不依赖
+   * 角色卡，只是以前被这个守卫一起关掉了 —— 沙盘里看着光秃秃的。
+   * 自己的名字行没有卡片时为空，但有战盟名的话还是照画。
+   */
+  if (!world || !(currentChar || selfGuildName)) {
     worldTags.setEnabled(false);
     return;
   }
   worldTags.setEnabled(true);
 
   const me = remotes.selfId;
-  const selfName = currentChar.name;
+  const selfName = currentChar?.name ?? selfGuildName;
   const terrain = world.terrain;
 
   const partyNumberOf = new Map<string, PartyMember>();
@@ -1854,9 +1967,14 @@ function syncWorldTags() {
     let name = e.name;
     if (e.kind === 'monster') {
       name = monsterNameOf(e.cls, e.name) || e.name || `怪物 ${e.cls}`;
-      const maxLife = e.maxHp > 0 ? e.maxHp : monsterMaxLifeOf(e.cls);
-      if (maxLife > 0) {
-        hpRatio = Math.max(0, Math.min(1, (e.hp > 0 ? e.hp : maxLife) / maxLife));
+      if (e.hpRate >= 0) {
+        // `0xF3/0xE2` 给的是精确百分比，直接用，不必再猜上限
+        hpRatio = Math.max(0, Math.min(1, e.hpRate / 100));
+      } else {
+        const maxLife = e.maxHp > 0 ? e.maxHp : monsterMaxLifeOf(e.cls);
+        if (maxLife > 0) {
+          hpRatio = Math.max(0, Math.min(1, (e.hp > 0 ? e.hp : maxLife) / maxLife));
+        }
       }
     }
 
@@ -1869,6 +1987,8 @@ function syncWorldTags() {
       kind: e.kind,
       focused,
       hpRatio,
+      // 战盟名（`0x5A/0x5C`）：只对玩家有意义，怪物/NPC 这个字段一直是空的
+      guild: e.kind === 'player' ? e.guild : undefined,
       // 队友才画十格条：`0x44` 的十等分；还没收到过就按满血画（原版初始也是 10）
       tenths: member ? (partyLife.get(member.number) ?? 10) : undefined,
       hpText: member ? `${Math.round(member.life)}/${Math.round(member.maxLife)}` : undefined,
@@ -1915,16 +2035,21 @@ function syncWorldTags() {
    * `remotes` 里没有自己这条（自己的实体是 `player`），所以单独补一条，
    * id 用 -1 当键，不会和远程实体撞。
    */
-  if (player && currentChar) {
+  /*
+   * 自己这条标签：正常进图一定有 `currentChar`；离线沙盘（`currentChar=null`）
+   * 只要设过战盟名也挂一条 —— 不然「盟名」这一行在沙盘里没法验，也看不见。
+   */
+  if (player && (currentChar || selfGuildName)) {
     const selfGround = terrain.getHeight(player.wx, player.wy);
     const h = headHeightOf(player, selfGround, 2.15);
     items.push({
       id: -1,
-      name: currentChar.name,
+      name: currentChar?.name ?? '',
       x: player.wx,
       y: player.wy,
       z: selfGround + h + 0.08,
       kind: 'player',
+      guild: selfGuildName || undefined,
     });
   }
 
@@ -2148,6 +2273,7 @@ function openGoldenArcher(data: { type: number; count: number; lucky: string }) 
   const col = gaCollectedCount();
   gaPanel.setCollected(col.rena, col.stone);
   if (gaInfo) gaPanel.setInfo(gaInfo);
+  sfxOpenWindow();
   gaPanel.show(data);
   console.log(
     `[ga] 0x94 打开 type=${data.type}（${['雷娜收集器', '宝石收集器', '幸运号码兑换', '号码查看'][data.type] ?? '?'}）` +
@@ -2235,6 +2361,7 @@ function openEventWindow(kind: 'ds' | 'bc') {
       kind === 'ds' ? findTicketSlot(TICKET.DS, i + 1) : findTicketSlot(TICKET.BC, i + 1)
     );
   }
+  sfxOpenWindow();
   eventPanel.show({
     kind,
     ranges: ranges.length ? ranges : Array.from({ length: count }, () => ({ min: 0, max: 0 })),
@@ -2422,6 +2549,7 @@ function toggleGuildPanel() {
   }
   if (partyPanel.isOpen) partyPanel.hide();
   guildPanel.setSelf(currentChar?.name ?? '');
+  sfxOpenWindow();
   guildPanel.show();
   bottomBar.setActive('guild');
   if (connection?.connected) {
@@ -2830,7 +2958,7 @@ function requestItemMove(from: number, to: number): boolean {
         inventoryPanel.toast('该部位已有装备，先把它脱到背包里', 2000);
         return false;
       }
-      const check = checkEquip(item.type, to, ch);
+      const check = checkEquip(item.type, to, ch, item);
       if (!check.ok) {
         lastMove.fail = 'equip';
         lastMove.reason = check.reason;
@@ -3149,7 +3277,15 @@ async function connectAndLogin(account: string, password: string) {
         // （`CommandManager::GCPostMessageGold`）。原版 `ReceiveWhisper` 用频道 0。
         const name = readChatStr(pkt, hs + 1, 10);
         const text = readChatStr(pkt, hs + 11);
-        if (text) chatBox.push(name, text, 0);
+        if (text) {
+          chatBox.push(name, text, 0);
+          /*
+           * 提示音 `PlayBuffer(0x26)` —— 就是 `iWhisper.wav`，由 `OpenBasicData`
+           * 尾部加载（`Scene_AssetLoad.cpp:165`），不是空槽。原版受 `m_bWhisperSound`
+           * 控制（`ChatListBox.cpp:1580`），这里读同一个开关。
+           */
+          if (escMenu.whisperSound) sfx(0x26, { volume: 0.7 });
+        }
       } else if (head === 0x0d) {
         applyNoticePacket(pkt);
       }
@@ -3284,6 +3420,8 @@ async function connectAndLogin(account: string, password: string) {
             currentChar.info.money = money;
             refreshHud();
             const spent = before > money ? before - money : 0;
+            // `iRepair`（0x25，`Scene_AssetLoad.cpp:164`）—— 只有真扣了钱才响
+            if (spent > 0) sfx(0x25, { volume: 0.7 });
             npcPanel.toast(
               spent > 0
                 ? `修理花费 ${spent.toLocaleString('en-US')} Zen（余额 ${money.toLocaleString('en-US')}）`
@@ -3438,6 +3576,55 @@ async function connectAndLogin(account: string, password: string) {
         const text = serverCommandText(type, cmd1);
         if (text) chatBox.push('系统', text, 1);
         console.log(`[cmd] 0xF3/0x40 type=${type} cmd1=${cmd1} cmd2=${cmd2} → ${text ?? '（无文案）'}`);
+      } else if (head === 0xf3 && sub === 0xe0) {
+        /*
+         * 角色信息扩展包（`PMSG_NEW_CHARACTER_INFO_SEND`，`Protocol.h:543`）。
+         *
+         * 这条是**转生次数唯一的来源** —— 0x03 那个 48 字节的老结构里没有。
+         * 服务端在登录、升级、加点、`/reset` 之后都会推一次，所以拿到就覆盖。
+         */
+        const extra = parseNewCharacterInfo(pkt);
+        if (extra) applyCharacterExtra(extra);
+      } else if (head === 0xf3 && sub === 0xe1) {
+        /*
+         * 角色最终属性（`PMSG_NEW_CHARACTER_CALC_SEND`，`Protocol.h:566`）。
+         *
+         * 服务端把物攻/魔攻/防御/防御率/攻速全算好了（含强化、追加、卓越、buff、
+         * 以及**耐久磨损的防御衰减**），角色面板直接用它，比本地近似式准。
+         */
+        const calc = parseCharacterCalc(pkt);
+        if (calc) characterPanel.setCalc(calc);
+      } else if (head === 0xf3 && sub === 0xe2) {
+        /*
+         * 视野内怪物的血条百分比（`GCHealthBarSend`，`Protocol.cpp:2236`）。
+         * 服务端每秒推一次，比「挨打时用 life+damage 反推上限」准得多。
+         */
+        const bars = parseHealthBar(pkt);
+        if (bars) remotes.applyHealthBars(bars);
+      } else if (head === 0xf3 && sub === 0x30) {
+        /*
+         * 按键/选项存档（`DGOptionDataRecv` → `DSProtocol.cpp:1030`）。
+         *
+         * `SkillKey[10]` + `GameOption`。GameOption 的两位开关就是 ESC 选项菜单的
+         * 「自动攻击 / 悄悄话提示音」（`UI_InGameMenu.cpp:89-90`）；Q/W/E 与
+         * ChatWindow 客户端仍然没有对应界面，原样存着，回写时别覆盖掉。
+         */
+        const opt = parseOptionData(pkt);
+        if (opt) {
+          serverOption = opt;
+          pendingHotkeys = opt.skillKey;
+          applyPendingHotkeys();
+          escMenu.setOptions((opt.gameOption & 0x01) !== 0, (opt.gameOption & 0x04) !== 0);
+        }
+      } else if (head === 0xf3 && sub === 0x07) {
+        /*
+         * 怪物打玩家（`GCMonsterDamageSend`，`Protocol.cpp:2046`）。
+         *
+         * 这个包**只发给被打的自己** —— 别人打谁走 0x15（那个发给攻击者）。
+         * 之前没接，所以自己挨打时既不飘字也不掉血条，只能等 0x26 慢慢同步。
+         */
+        const hit = parseMonsterDamage(pkt);
+        if (hit) applySelfHurt(hit.damage, hit.curHp);
       } else if (head === 0xf3 && sub === 0xe3) {
         /*
          * 堆叠上限表（`CItemStack::GCItemStackListSend`）。
@@ -4583,6 +4770,15 @@ function currentEquip(): EquipSet {
     return { ...sandbox.slots, cls: sandbox.cls, safeZone };
   }
   const at = (slot: number) => inventoryItems.find(i => i.slot === slot)?.type;
+  /*
+   * 强化等级：`CItem::m_Level`，来自背包包（0xF3/0x10）的 `InventoryItem.level`。
+   * 原版视野包 `CharSet[11]` 不带强化等级，所以只有自己的角色能画出 +N 光效 ——
+   * 远程玩家在 `world/remotes.ts` 里走的是不含 `levels` 的 `EquipSet`，行为一致。
+   *
+   * 空槽必须给 0：不然脱下 +9 武器后 `levels.weapon` 还留着 9，
+   * 虽然没网格可画，但会让换装签名抖动、每次进安全区都白重建一次。
+   */
+  const lv = (slot: number) => (at(slot) === undefined ? 0 : inventoryItems.find(i => i.slot === slot)?.level ?? 0);
   return {
     weapon: at(0),
     shield: at(1),
@@ -4592,8 +4788,20 @@ function currentEquip(): EquipSet {
     gloves: at(5),
     boots: at(6),
     wing: at(7),
+    // 槽 8 = 守护（Helper01..04）：原版是独立模型挂在骨骼 34 上，不是装备部件
+    helper: at(8),
     cls: playerClass(),
     safeZone,
+    levels: {
+      weapon: lv(0),
+      shield: lv(1),
+      helm: lv(2),
+      armor: lv(3),
+      pants: lv(4),
+      gloves: lv(5),
+      boots: lv(6),
+      wing: lv(7),
+    },
   };
 }
 
@@ -5236,6 +5444,7 @@ function toggleInventory(show?: boolean) {
   else if (show === false) inventoryPanel.hide();
   else inventoryPanel.toggle();
   if (inventoryPanel.isOpen) {
+    sfxOpenWindow();
     inventoryPanel.setMoney(currentChar?.info?.money ?? 0);
     // 原版这几个面板是同一块 190 宽底板（450,0），同时开会完全重叠，
     // 所以这边强制互斥：开背包就收掉属性 / 战盟面板。
@@ -5252,6 +5461,7 @@ function toggleInventory(show?: boolean) {
 function toggleCharacter(show?: boolean) {
   const next = show ?? !characterPanel.isOpen;
   if (next) {
+    sfxOpenWindow();
     inventoryPanel.hide();
     characterPanel.show();
     syncCharacterPanel();
@@ -5286,7 +5496,8 @@ function syncCharacterPanel() {
     currentChar.level,
     cls,
     currentChar.info ?? null,
-    worn
+    worn,
+    resetCount
   );
 }
 
@@ -5380,6 +5591,31 @@ function ambientPointScale() {
 /** 调试用：模拟角色卡（探针验证等级/金币门槛时用），null = 用真实角色 */
 let moveStatusOverride: { level: number; money: number; wings: boolean; reset: number } | null = null;
 
+/**
+ * 转生次数 —— 只能从 `0xF3/0xE0`（`PMSG_NEW_CHARACTER_INFO_SEND`）拿。
+ *
+ * 原版 0x03 角色包（48 字节）里没有这两个字段，所以以前这里是写死的 0，
+ * `/move` 的「需要转生 N 次」门槛等于没做。服务端 `GAMESERVER_EXTRA == 1`
+ * 时会主动推 E0，把 `ViewReset` / `ViewGrandReset` 带上。
+ */
+let resetCount = 0;
+let grandResetCount = 0;
+
+function applyCharacterExtra(info: {
+  level: number;
+  reset: number;
+  grandReset: number;
+}) {
+  const changed = info.reset !== resetCount || info.grandReset !== grandResetCount;
+  resetCount = info.reset;
+  grandResetCount = info.grandReset;
+  if (!changed) return;
+  console.log(`[char] 转生 ${resetCount}（大转生 ${grandResetCount}）`);
+  // 移动命令面板的门槛校验 + 角色面板标题都要跟着刷新
+  refreshMovePanel();
+  syncCharacterPanel();
+}
+
 function refreshMovePanel() {
   if (moveStatusOverride) {
     movePanel.status = { ...moveStatusOverride };
@@ -5390,7 +5626,7 @@ function refreshMovePanel() {
   movePanel.status = {
     level: currentChar?.level ?? 0,
     money: currentChar?.info?.money ?? -1,
-    reset: 0,
+    reset: resetCount,
     wings: wing !== undefined,
   };
   movePanel.refresh();
@@ -5772,6 +6008,10 @@ interface DemoTarget {
   maxHp: number;
   x: number;
   y: number;
+  /** 召唤出来的宠物（跟玩家绕圈，不参与「最近的怪」判定） */
+  pet?: boolean;
+  /** 宠物对应的 Class，去重用 */
+  cls?: number;
 }
 
 const demoTargets = new Map<number, DemoTarget>();
@@ -5865,7 +6105,8 @@ function nearestDemoTarget(x: number, y: number, range: number): DemoTarget | nu
   let best: DemoTarget | null = null;
   let bestDist = range;
   for (const t of demoTargets.values()) {
-    if (t.hp <= 0) continue;
+    // 自己的宠物不算靶子，否则放技能会先打到它
+    if (t.hp <= 0 || t.pet) continue;
     const d = Math.hypot(t.x - x, t.y - y);
     if (d < bestDist) {
       bestDist = d;
@@ -5873,6 +6114,109 @@ function nearestDemoTarget(x: number, y: number, range: number): DemoTarget | nu
     }
   }
   return best;
+}
+
+/**
+ * 召唤技能 → 召唤出来的怪物 Class（`Monster.txt` 的 Index 列）。
+ *
+ * 服务端那边这层映射是 `ServerInfo.txt` 的 `SummonMonster1..7`（`ServerInfo.cpp:1622`），
+ * 本仓库的配置里没写，取默认值 —— 所以这里按技能名直接对表，效果一样。
+ */
+const SUMMON_CLASS: Record<number, number> = {
+  30: 26, // Summon Goblin
+  31: 32, // Summon Stone Golem
+  32: 21, // Summon Assassin
+  33: 20, // Summon Elite Yeti
+  34: 10, // Summon Dark Knight
+  35: 150, // Summon Bali
+  36: 151, // Summon Soldier
+};
+
+/**
+ * 离线演示的召唤：真的生成一只跟在身边的宠物。
+ *
+ * 正式服里召唤物是服务端建实体 + `0x1F` 下发（`GCViewportSummonSend`），
+ * demo 没有服务端，所以以前放召唤技能只有一圈光环、什么都没有 ——
+ * 看起来就像「召唤技能没做」。这里本地补一只，行为和正式服观感一致。
+ */
+async function spawnDemoSummon(skillId: number): Promise<void> {
+  if (!player || !world) return;
+  const cls = SUMMON_CLASS[skillId];
+  if (!cls) return;
+
+  // 同一种召唤只留一只（重复施法就当刷新）
+  for (const t of demoTargets.values()) {
+    if (t.pet && t.cls === cls) {
+      t.hp = t.maxHp;
+      damageTexts.spawn(
+        { x: t.actor.x, y: t.actor.y, z: t.actor.z + 1.8 },
+        '召唤刷新',
+        'exp'
+      );
+      return;
+    }
+  }
+
+  const created = await createCreatureByClass(
+    scene,
+    { monster: MONSTER_DIR, npc: NPC_DIR },
+    cls
+  );
+  if (!created) {
+    console.warn(`[demo] 召唤技能 ${skillId}：Class=${cls} 没有可用模型`);
+    return;
+  }
+
+  const { actor } = created;
+  actor.root.name = `demo-pet-${cls}`;
+  const gx = player.x + 1.7;
+  const gy = player.y;
+  actor.x = gx;
+  actor.y = gy;
+  actor.z = world.terrain.getHeight(gx + 0.5, gy + 0.5);
+  actor.play(MONSTER_ACTION.STOP, true);
+
+  // 血量取 Monster.txt 的真实 MaxLife，名字用服务端表里的中文名
+  const maxHp = Math.max(1, monsterMaxLifeOf(cls) || 100);
+  const def = {
+    ...(demoMonsterDefs.get(actor) ?? {}),
+    name: monsterNameOf(cls, actor.name),
+    maxHp,
+  } as MonsterDef;
+  demoTargets.set(demoNextTargetId, {
+    id: demoNextTargetId++,
+    actor,
+    def,
+    hp: maxHp,
+    maxHp,
+    x: gx,
+    y: gy,
+    pet: true,
+    cls,
+  });
+  console.log(`[demo] 召唤 ${actor.name}（Class=${cls}）`);
+}
+
+/**
+ * 宠物跟随：绕玩家慢慢转圈，位置用指数插值逼近，看起来像在飘。
+ * 每帧从主循环调用（demo 的普通怪是静止的，只有宠物需要动）。
+ */
+function updateDemoPets(dt: number) {
+  if (!player || !world) return;
+  const now = performance.now() * 0.0006;
+  for (const t of demoTargets.values()) {
+    if (!t.pet || t.hp <= 0) continue;
+    const ang = now + t.id * 0.9;
+    const gx = player.x + Math.cos(ang) * 1.7;
+    const gy = player.y + Math.sin(ang) * 1.7;
+    const k = Math.min(1, dt * 3.5);
+    t.actor.x += (gx - t.actor.x) * k;
+    t.actor.y += (gy - t.actor.y) * k;
+    t.actor.z = world.terrain.getHeight(t.actor.x + 0.5, t.actor.y + 0.5);
+    t.actor.yaw = Math.atan2(gy - t.actor.y, gx - t.actor.x);
+    t.x = t.actor.x;
+    t.y = t.actor.y;
+  }
 }
 
 /**
@@ -6154,6 +6498,108 @@ async function serverTeleport(map: number, x: number, y: number, dir: number) {
 
 /** 换图进行中（防止 0x1C 重入） */
 let teleporting = false;
+
+/* ------------------------------------------------------------------ */
+/* 传送门（踩上去就过图）                                              */
+/* ------------------------------------------------------------------ */
+
+/** 发过请求后的防抖截止时间（原版 3 秒，`GetTickCount() - last < 3000`） */
+let gateLockUntil = 0;
+/** 等级不够之类的提示节流，别每帧刷屏 */
+let gateWarnAt = 0;
+/** 探针/排查用的小计数（每帧都跑的东西，出问题得能看出「到底进没进来」） */
+const gateStats = { calls: 0, hits: 0, blocks: 0, lastSkip: '', at: [0, 0] as number[], map: 0 };
+/** 上一次提示的内容，避免同一句反复推 */
+let gateWarnKey = '';
+
+/**
+ * 每帧检查「有没有踩在传送门上」。
+ *
+ * 这是**协议要求**而不是可选项：服务端只在收到 `C1 06 1C [gate]` 时才搬人
+ * （`CMove::CGTeleportRecv`），它自己不会发现你站在门上。原版在 `CheckGate`
+ * 里做同一件事，我们一直缺，所以所有地图之间的路口走过去都没反应。
+ *
+ * 离线演示（没有 session）没有服务端，就直接按目的地门的矩形本地过图，
+ * 让 demo 里也能走通。
+ */
+function updateGateCheck() {
+  gateStats.calls++;
+  if (!world || !player || playerDead) {
+    gateStats.lastSkip = 'state';
+    return;
+  }
+  // 读条/换图期间不动：那会儿坐标还在旧地图上
+  if (!loadingEl.classList.contains('hidden') || teleporting) {
+    gateStats.lastSkip = 'loading';
+    return;
+  }
+  if (performance.now() < gateLockUntil) {
+    gateStats.lastSkip = 'lock';
+    return;
+  }
+
+  const typeAt = (slot: number) => inventoryItems.find(i => i.slot === slot)?.type ?? 0;
+  const cx = Math.floor(player.x);
+  const cy = Math.floor(player.y);
+  gateStats.at = [cx, cy];
+  gateStats.map = world.mapId;
+  const res = checkWalkGate(world.mapId, cx, cy, {
+    /*
+     * 离线沙盘（`currentChar` 为 null）没有角色卡，等级给上限值 400 ——
+     * 不然 demo 里每道门都弹「等级不足」，地图之间一步也走不通。
+     * **不能给 999**：`Gate.txt` 的 `MaxLvl` 就是 400，超了会被上限那条挡掉。
+     * 线上永远走真实等级。
+     */
+    level: currentChar?.level ?? 400,
+    charClass: playerClass(),
+    wing: typeAt(7),
+    helper: typeAt(8),
+  });
+
+  if (res.hit) {
+    const { gate, dest } = res.hit;
+    gateStats.hits++;
+    gateLockUntil = performance.now() + 3000;
+    if (session && connection?.connected) {
+      connection.send(buildGateTeleportPacket(gate));
+      console.log(`[gate] 请求过图 gate=${gate} → map=${dest.map}`);
+      return;
+    }
+    // 离线：按落点门的矩形自己搬
+    const tile =
+      (dest.map === world.mapId &&
+        findSpawnTileInRect(world.terrain, { x1: dest.x1, y1: dest.y1, x2: dest.x2, y2: dest.y2 })) ||
+      {
+        x: dest.x1 + Math.floor(Math.random() * Math.max(1, dest.x2 - dest.x1 + 1)),
+        y: dest.y1 + Math.floor(Math.random() * Math.max(1, dest.y2 - dest.y1 + 1)),
+      };
+    void serverTeleport(dest.map, tile.x, tile.y, dest.dir);
+    console.log(`[gate] 离线过图 gate=${gate} → map=${dest.map} (${tile.x},${tile.y})`);
+    return;
+  }
+
+  // 被条件挡住：给一句提示（原版 `GlobalText[261/263/350]`）
+  if (!res.block) {
+    gateWarnKey = '';
+    gateStats.lastSkip = 'no-gate';
+    return;
+  }
+  gateStats.blocks++;
+  const key = `${res.block}:${res.need ?? 0}`;
+  if (key === gateWarnKey && performance.now() - gateWarnAt < 4000) return;
+  gateWarnKey = key;
+  gateWarnAt = performance.now();
+  const msg =
+    res.block === 'level'
+      ? `等级不足：这道门需要 ${res.need ?? 0} 级`
+      : res.block === 'wings'
+        ? textSync(263, '天空之城需要装备翅膀')
+        : res.block === 'helper'
+          ? textSync(569, '这个坐骑不能进入天空之城')
+          : textSync(261, '这个坐骑不能进入这张地图');
+  chatBox.notice(msg);
+}
+
 
 async function ensurePlayer(): Promise<Actor> {
   if (player) return player;
@@ -6980,6 +7426,12 @@ async function castSkill(skill: SkillEntry) {
   const act = spec.action >= 0 ? spec.action : attackAction(animInput(), attackCombo++);
   player.play(act, false);
 
+  /*
+   * 召唤类技能（30..36）：正式服靠服务端建实体 + `0x1F` 下发，demo 没有服务端，
+   * 以前只有一圈召唤光环、画面里什么都不会出现。这里本地生成一只跟随的宠物。
+   */
+  if (SUMMON_CLASS[skill.id]) void spawnDemoSummon(skill.id);
+
   /* 3. 延迟出特效（时间是毫秒，跟着角色挥手的节奏） */
   window.setTimeout(() => {
     const me = player;
@@ -7734,12 +8186,31 @@ remotes.onSkillState = (id, mask) => {
   buffLayer.add(id, mask);
 };
 remotes.onEntityGone = id => buffLayer.clear(id);
+/**
+ * 战盟标志落到自己身上：`0x5A/0x5C` 里 `index` 是自己时，服务端也会发一份，
+ * 但本地玩家不在 `remotes.entities` 里，所以由这里转给主角色。
+ */
+/** 自己的战盟名（`0x5A/0x5C` 里 index 是自己时下发），画在头顶第二行 */
+let selfGuildName = '';
+remotes.onSelfGuild = (mark, name) => {
+  player?.setGuildMark(mark);
+  selfGuildName = name ?? '';
+};
 
 /* 服务端下发的伤害 → 飘字；死亡 → 经验 */
 remotes.onDamage = hit => {
   // damage 为 0 时不飘字（服务端对完全吸收/自己挨打会发 0，显示「-0」很怪）
   if (hit.damage <= 0) return;
-  const cls = hit.type === 0x10 ? 'crit' : '';
+  /*
+   * 伤害类型在 `damage[0]` 的高 4 位（`User.h:136-140`）：
+   *
+   *   0x00 普通        0x10 无视防御（毒/火/坠落这类）
+   *   0x20 反射伤害    0x40 **卓越一击**    0x80 **暴击**
+   *
+   * 之前这里写的是 `type === 0x10 → crit`，把「无视防御」当成了暴击 ——
+   * 真正的暴击（0x80）反而没样式，卓越（0x40）完全没处理。
+   */
+  const cls = damageClassOf(hit.type);
   // 服务端的 x/y 是格号，飘字要落在格心（和角色渲染位置一致）
   damageTexts.spawn({ x: hit.x + 0.5, y: hit.y + 0.5, z: hit.z }, String(hit.damage), cls);
 
@@ -7751,7 +8222,7 @@ remotes.onDamage = hit => {
   if (player) {
     const d = Math.hypot(hit.x - player.x, hit.y - player.y);
     const vol = Math.max(0.12, Math.min(1, 1 - d / 18));
-    const heavy = hit.type === 0x10 || hit.damage > 120;
+    const heavy = hit.type === 0x80 || hit.type === 0x40 || hit.damage > 120;
     sfxRandom(heavy ? [0x35, 0x36, 0x37, 0x38] : [0x32, 0x33, 0x34], {
       volume: vol * 0.7,
     });
@@ -7807,7 +8278,17 @@ remotes.onDie = (id, experience) => {
 };
 
 let lastHurtSoundAt = 0;
-remotes.onSelfDamage = (damage, life) => {
+/**
+ * 「自己挨打」的统一表现：惨叫 + 伤害飘字 + HP 更新。
+ *
+ * 两个来源都走这里：
+ *   - `0x15`（`GCDamageSend` 发给**攻击者**，但自己打自己 / 反射时 targetId 会是自己）
+ *   - `0xF3/0x07`（`GCMonsterDamageSend`，怪物打玩家时**直接发给自己**）
+ *
+ * 服务端这两条是 `if / else if` 互斥分支（`ObjectManager.cpp:2923-2931` 的
+ * `DamageType`），所以同一笔伤害不会飘两次。
+ */
+function applySelfHurt(damage: number, life: number) {
   // 挨打时那三声惨叫（`pMaleScream1..3`）；0.97 就是男/女两套，
   // 我们不分性别，用男声，节流 1.2 秒（否则连击时会糊成一片）
   if (damage > 0 && performance.now() - lastHurtSoundAt > 1200) {
@@ -7821,7 +8302,9 @@ remotes.onSelfDamage = (damage, life) => {
     currentChar.info.life = life;
     refreshHud();
   }
-};
+}
+
+remotes.onSelfDamage = (damage, life) => applySelfHurt(damage, life);
 
 /* ------------------------------------------------------------------ */
 /* 地面物品：拾取                                                       */
@@ -8319,6 +8802,7 @@ function openLocalShop(npc: DemoNpc, shop: ShopDef) {
   localShopItems = shelf;
   npcMode = 'shop';
   npcPanel.quickBuy = true; // 离线演示：单击就买（联机仍是拖拽）
+  sfxOpenWindow();
   npcPanel.show('shop');
   // 商店开着时把背包也摆出来：卖东西要能点到背包格（手机上按 I 找面板太麻烦）
   if (!inventoryPanel.isOpen) inventoryPanel.show();
@@ -8331,6 +8815,7 @@ function openLocalShop(npc: DemoNpc, shop: ShopDef) {
 function openLocalWarehouse() {
   npcMode = 'warehouse';
   npcPanel.quickBuy = true;
+  sfxOpenWindow();
   npcPanel.show('warehouse');
   npcPanel.setItems(localWh.items);
   if (!inventoryPanel.isOpen) inventoryPanel.show();
@@ -8693,6 +9178,7 @@ function onNpcTalkReply(pkt: Uint8Array) {
     chaosItems = [];
     chaosPanel.setItems([]);
     chaosPanel.setRecipe(0);
+    sfxOpenWindow();
     chaosPanel.show();
     chaosPanel.toast('点背包物品放入材料 · 点箱子物品取回', 'ok');
     return;
@@ -10594,7 +11080,12 @@ function updateTargetHud() {
   }
   targetEl.classList.remove('hidden');
   targetName.textContent = e.name;
-  const pct = e.maxLife > 0 ? Math.max(0, Math.min(1, e.life / e.maxLife)) : 1;
+  const pct =
+    e.hpRate >= 0
+      ? Math.max(0, Math.min(1, e.hpRate / 100))
+      : e.maxLife > 0
+        ? Math.max(0, Math.min(1, e.life / e.maxLife))
+        : 1;
   targetFill.style.width = `${(pct * 100).toFixed(1)}%`;
 }
 
@@ -10602,8 +11093,12 @@ function frame() {
   requestAnimationFrame(frame);
 
   const dt = Math.min(clock.getDelta(), 0.1) * dbgTimeScale;
+  // 装备强化光效的脉冲（原版 `DAT_083a45d4` 的亮度摆动）。材质全局共享，一次即可
+  tickItemGlow(performance.now());
 
   if (world && player) {
+    // 召唤出来的宠物绕玩家飘（demo 的普通怪是静止的，只有它们要动）
+    updateDemoPets(dt);
     /* ---- 死亡时锁住操作 ---- */
     if (playerDead) {
       keys.clear();
@@ -10837,6 +11332,12 @@ function frame() {
       // 停下来也把最后几步发出去（服务端 120ms 收一包，别攒着）
       flushMoves();
     }
+
+    /*
+     * 踩到传送门就过图。放在移动之后、攻击之前 —— 原版 `CheckGate` 也是
+     * 在移动处理完的同一帧里调，这样「走到门上的那一格」立刻生效。
+     */
+    updateGateCheck();
 
     // 攻击收招：回到当前装备对应的待机动作（装翅膀时是 9/10 的飞行待机）
     if (isAttacking() && player.finished && !isMoving) {
@@ -11279,6 +11780,23 @@ function boot() {
     },
     /** 调试：移动命令的数据表（Move.txt + Gate.txt 的合并结果） */
     warpTable: () => warpTable.snapshot(),
+    /** 调试：传送门检测的运行状态（进了多少帧 / 命中几次 / 被什么挡住） */
+    gateState: () => ({ ...gateStats, lockLeft: Math.max(0, gateLockUntil - performance.now()) }),
+    /**
+     * 调试：问「某个格子踩在传送门上吗」（原版 `CheckGate` 的判定部分）。
+     *
+     * 不传 `level` 用当前角色等级；探针要验不同等级门槛时直接传。
+     * `charClass` 传 3 可以验魔剑士那条 ×2/3 的规则。
+     */
+    gateCheck: (x: number, y: number, level?: number, charClass?: number, wing?: number, helper?: number) => {
+      if (!world) return null;
+      return checkWalkGate(world.mapId, x, y, {
+        level: level ?? currentChar?.level ?? 0,
+        charClass: charClass ?? playerClass(),
+        wing: wing ?? 0,
+        helper: helper ?? 0,
+      });
+    },
     /** 调试：用服务端原文整表替换移动表（模拟服务端同步） */
     syncWarpTable: (moveText: string, gateText: string) => {
       warpTable.applyText(moveText, gateText, 'server');
@@ -11735,10 +12253,130 @@ function boot() {
       session.onPacket?.(new Uint8Array(bytes));
       return bytes.length;
     },
+    /** 调试：模拟一份 `0xF3/0xE1` 属性包，验证角色面板是否优先用服务端值 */
+    charCalc: (calc: Record<string, number> | null) => {
+      if (!calc) {
+        characterPanel.setCalc(null);
+        return false;
+      }
+      const zero = {
+        curHp: 0,
+        maxHp: 0,
+        curMp: 0,
+        maxMp: 0,
+        curBp: 0,
+        maxBp: 0,
+        physiSpeed: 0,
+        magicSpeed: 0,
+        physiDmgMin: 0,
+        physiDmgMax: 0,
+        magicDmgMin: 0,
+        magicDmgMax: 0,
+        magicDmgRate: 0,
+        attackSuccessRate: 0,
+        damageMultiplier: 100,
+        defense: 0,
+        defenseSuccessRate: 0,
+      };
+      characterPanel.setCalc({ ...zero, ...calc } as never);
+      return true;
+    },
+    /** 调试：打开/关闭角色面板（读面板文本做断言用） */
+    charPanel: (show = true) => {
+      toggleCharacter(show);
+      return show;
+    },
+    /** 调试：当前角色面板上显示的文字（id → 文本） */
+    charPanelText: () => characterPanel.snapshot(),
+    /**
+     * 调试：所有技能的施法规格一览（动作号 / 特效来源 / 部件数）。
+     *
+     * `source` 三档：
+     *   `client`   —— 源码 `MoveCharacter` 里查到的特效
+     *   `fallback` —— 源码没给视觉，用本地兜底表现
+     *   `none`     —— 源码确实没有视觉（只有动作+音效），不该硬造
+     *
+     * 对照实机时用：某个技能表现不对，先看它这一行——`action` 是不是 -1（随武器挥砍）、
+     * `parts` 是不是 0（没有特效部件）。
+     */
+    skillSpecs: () => {
+      const rows: Array<Record<string, unknown>> = [];
+      for (const [id, meta] of skillTable) {
+        const spec = castOf(meta);
+        rows.push({
+          id,
+          name: meta.name,
+          action: spec.action,
+          source: spec.source,
+          parts: spec.parts.length,
+          special: spec.special ?? '',
+          note: spec.note,
+        });
+      }
+      return rows.sort((a, b) => Number(a.id) - Number(b.id));
+    },
+    /** 调试：已收到过的 F3 子码（排查「服务端到底发没发这个包」） */
+    f3Seen: () => [...f3Seen].sort((a, b) => a - b),
+    /** 调试：最近见过的视野实体类型（召唤物 Class 不对时看这里） */
+    seenTypes: () => remotes.debug.types,
     /** 直接套一组装备（只改外观，不动背包）—— 验证模型/骨骼映射用 */
-    previewEquip: async (equip: EquipSet) => (player ? applyEquipment(player, PLAYER_DIR, equip) : null),
+    previewEquip: async (equip: EquipSet) => {
+      if (!player) return null;
+      const out = await applyEquipment(player, PLAYER_DIR, equip);
+      // `glows` = 这次换装生成的强化光效副本数（0 = 全身 +0..+2，没有光）
+      return { ...out, glows: player.glows.length };
+    },
     /** 调试：运行时改背武器姿态（探针一次试多个候选） */
     backPose: (p: Record<string, unknown>) => setBackPose(p as never),
+    /**
+     * 调试：守护/宠物的位置与播放速度。
+     *
+     * 原版写死 `(20,0,0)` 游戏单位 + `PlaySpeed 0.5`，但骨骼 34 的局部轴和世界轴
+     * 不是一回事，实测可能要微调。传 `{offset:[x,y,z]}` / `{speed:n}`。
+     */
+    helperPose: (p: { offset?: [number, number, number]; speed?: number }) => {
+      setHelperPose(p);
+      if (player?.helper) {
+        if (p.offset) player.helper.root.position.fromArray(p.offset);
+        if (p.speed !== undefined) player.helper.speed = p.speed;
+      }
+      return { ...HELPER_POSE };
+    },
+    /** 调试：主角骨架的「序号:骨骼名」列表（找挂点用，比如盾牌骨骼 26） */
+    bones: () => (player ? player.rig.bones.map((b, i) => `${i}:${b.name}`) : []),
+    /** 调试：转主角朝向（度，0 = 面向世界 +X）。截图验挂点时用来把部位转到镜头前 */
+    face: (deg: number) => {
+      if (!player) return false;
+      player.yaw = (deg * Math.PI) / 180 + MODEL_YAW_OFFSET;
+      return true;
+    },
+    /**
+     * 调试：给主角挂一个战盟标志。`cells` 是 64 格（0..15，索引 = y*8+x），
+     * 传 `null` 摘掉。离线沙盘没有服务端，验外观只能这样灌。
+     */
+    guildMark: (cells: number[] | null) => {
+      if (!player) return false;
+      if (!cells) {
+        player.setGuildMark(null);
+        return true;
+      }
+      // 允许传 64 格不满的部分，其余补 0
+      const full = new Array(64).fill(0).map((_, i) => (cells[i] ?? 0) & 0x0f);
+      player.setGuildMark(packGuildMark(full));
+      return !!player.guildMark;
+    },
+    /** 调试：微调标志在骨骼上的位移/旋转/缩放（原版几何抄过来未必贴脸） */
+    guildMarkPose: (p: { offset?: [number, number, number]; scale?: number }) => {
+      const m = player?.guildMark;
+      if (!m) return null;
+      if (p.offset) m.position.fromArray(p.offset);
+      if (p.scale !== undefined) m.scale.set(m.scale.x, m.scale.y, 1).multiplyScalar(p.scale);
+      return {
+        offset: m.position.toArray().map(n => Number(n.toFixed(3))),
+        scale: [Number(m.scale.x.toFixed(3)), Number(m.scale.y.toFixed(3))],
+        bone: m.parent ? (m.parent as THREE.Bone).name ?? '' : '',
+      };
+    },
     /**
      * 调试：地形光照端点（`light = floor + gain × TerrainLight`）。
      * 探针一次性试几组 floor/gain，出图后挑观感最接近原版的一组。
@@ -12191,6 +12829,21 @@ function boot() {
         : null,
     /** 视野里的战盟成员映射（`0x5B`） */
     guildMembers: () => remotes.guildMembers,
+    /**
+     * 调试：直接给「自己」设战盟名/标志（离线沙盘没有 0x5A）。
+     * `cells` 传 64 格图案，`null` = 摘掉标志；`name` 传空串 = 没有盟名。
+     */
+    selfGuild: (name: string, cells?: number[] | null) => {
+      selfGuildName = name ?? '';
+      if (cells === undefined) return { name: selfGuildName, mark: !!player?.guildMark };
+      if (!cells) {
+        player?.setGuildMark(null);
+      } else {
+        const full = new Array(64).fill(0).map((_, i) => (cells[i] ?? 0) & 0x0f);
+        player?.setGuildMark(packGuildMark(full));
+      }
+      return { name: selfGuildName, mark: !!player?.guildMark };
+    },
     /**
      * 头顶标签快照（`Render_HPBars` / `Render_CharNameTags`）。
      * 每条：`{ id, name, bar, tenths, focused, visible, pos }`。
@@ -13074,17 +13727,26 @@ function boot() {
      *   `__MU_APP__.inventoryFill([0, 391, 471])`
      * 从 12 号格开始按 1×1 摆放；宽高不一的物品可能重叠，够用了。
      */
-    inventoryFill: (types: number[], show = true) => {
-      inventoryItems = types.map((type, i) => ({
-        slot: 12 + i,
-        type,
-        level: 0,
-        skill: false,
-        luck: false,
-        option: 0,
-        durability: 20,
-        excellent: 0,
-      }));
+    inventoryFill: (
+      items: Array<
+        number | { type: number; level?: number; option?: number; excellent?: number; luck?: boolean }
+      >,
+      show = true
+    ) => {
+      inventoryItems = items.map((it, i) => {
+        // 允许直接传 `{ type, level, option, excellent, luck }`，验证 tooltip 用得上
+        const type = typeof it === 'number' ? it : it.type;
+        return {
+          slot: 12 + i,
+          type,
+          level: typeof it === 'number' ? 0 : (it.level ?? 0),
+          skill: false,
+          luck: typeof it === 'number' ? false : (it.luck ?? false),
+          option: typeof it === 'number' ? 0 : (it.option ?? 0),
+          durability: 20,
+          excellent: typeof it === 'number' ? 0 : (it.excellent ?? 0),
+        };
+      });
       inventoryPanel.setItems(inventoryItems);
       if (show) toggleInventory(true);
       return inventoryItems.length;
@@ -13206,6 +13868,11 @@ function boot() {
      * 老探针点的就是那个按钮，按钮现在改成「结束游戏」了，改走这个口。
      */
     offline: (cls?: number) => void enterOfflineSandbox(cls),
+    /**
+     * 调试：按演示角色卡进游戏（走真正的 `/demo` 那条路，有 `currentChar`、
+     * 有头顶名字/战盟名）。`__MU_APP__.offline()` 是纯沙盘，角色卡是空的。
+     */
+    demoChar: (name = '演示·剑士') => selectCharacterOffline(name),
     /** 调试：当前是否离线演示页面（`/demo`） */
     isDemo: () => DEMO,
     /** 调试：物品悬停旋转的当前状态（`ui/itemSpin.ts`） */
@@ -14001,6 +14668,8 @@ function boot() {
         level: t.def.level,
         hp: t.hp,
         maxHp: t.maxHp,
+        /** 召唤出来的宠物（绕玩家飘，不参与「最近的怪」判定） */
+        pet: !!t.pet,
         x: +t.x.toFixed(1),
         y: +t.y.toFixed(1),
         dist: player ? +Math.hypot(t.x - player.x, t.y - player.y).toFixed(2) : -1,

@@ -699,6 +699,16 @@ button.small {
   color: #ff8a4c;
 }
 
+/*
+ * 卓越一击（`DAMAGE_TYPE_EXCELLENT = 0x40`）：原版是青蓝色，比普通伤害更大。
+ * 和暴击（橙色 0x80）区分开，玩家一眼能认出「这一下是卓越」。
+ */
+.dmg.exc {
+  font-size: 19px;
+  color: #64e3ff;
+  text-shadow: 0 0 6px rgba(100, 227, 255, 0.7);
+}
+
 .dmg.exp {
   font-size: 12px;
   color: #8fd8ff;
@@ -871,6 +881,15 @@ button.small {
   line-height: 1.15;
   letter-spacing: 0.3px;
   color: #ded7c6;
+  text-shadow: 0 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.85);
+}
+
+/* 战盟名：名字下面第二行小字（0.97 之后才有的表现，颜色取偏青灰） */
+.wtag-guild {
+  font-size: 10px;
+  line-height: 1.1;
+  letter-spacing: 0.2px;
+  color: #9fd0e8;
   text-shadow: 0 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.85);
 }
 
@@ -1157,6 +1176,12 @@ button.small {
 
 .ui-tip .tip-stat {
   color: #cfd8e3;
+  font-size: 10px;
+}
+
+/* 卓越（Excellent）词条：原版这些行是蓝色（`AppendInventorySpecialOptionLines` 的 C_BLUE） */
+.ui-tip .tip-exc {
+  color: #6fb7ff;
   font-size: 10px;
 }
 

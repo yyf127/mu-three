@@ -101,6 +101,8 @@ for (const raw of lines) {
   const reqVit = pick(f, 'ReqVit');
   const dura = pick(f, 'Durab');
   const atkSpeed = isWeapon ? pick(f, 'AtkSped') : pick(f, 'DefRate');
+  // `ItemInfo.Level`（不是 ReqLvl）：服务端 `CItem::Convert` 拿它缩放需求/卓越加成
+  const itemLevel = pick(f, 'Level');
 
   const dw = pick(f, 'DW');
   const dk = pick(f, 'DK');
@@ -111,6 +113,7 @@ for (const raw of lines) {
   rows.set(group * 32 + idx, [
     w, h, name, dmgMin, dmgMax, def,
     slot, reqLevel, reqStr, reqAgi, reqEne, reqVit, dura, clsMask, atkSpeed,
+    itemLevel,
   ]);
 }
 
@@ -125,8 +128,10 @@ const out = `/* 本文件由 tools/gen-item-attrs.mjs 生成，勿手改。
  * type = group * 32 + index，和客户端 \`GET_ITEM(group,index)\`、
  * 服务端 \`CItem::m_Index\` 完全一致；宽高单位是背包格（20px 一格）。
  *
- * 数值都是 **+0 基础值**（不含强化/追加/卓越）。
+ * 数值都是 **+0 基础值**（不含强化/追加/卓越）。强化后的实际数值见 itemPower.ts。
  */
+import { itemNameSync } from './localText';
+
 export type ItemRow = [
   /** 占格宽 */ number,
   /** 占格高 */ number,
@@ -143,6 +148,7 @@ export type ItemRow = [
   /** 耐久 */ number,
   /** 职业掩码 DW|DK<<1|ELF<<2|MG<<3，0 = 通用 */ number,
   /** 攻击速度（武器）或防御率（盾/防具） */ number,
+  /** \`ItemInfo.Level\`：强化需求 / 卓越加成的基准，不是需求等级 */ number,
 ];
 
 export const ITEM_ATTRS: Record<number, ItemRow> = {
@@ -150,6 +156,21 @@ ${body}
 };
 
 const ATTR_CACHE = new Map<number, ItemAttr>();
+
+/**
+ * 物品中文名来自 Data/Local/chs/item.bmd（localText.ts::loadItemNames）。
+ *
+ * ITEM_ATTRS 这张静态表是照着服务端 Item.txt 整理的，**名字是英文**
+ * （Kris / Serpent Sword / Small Mana Potion），所以背包、商店、仓库的
+ * tooltip 一直是英文 —— 而 Win 端那些位置显示的是「波刃剑 / 巨蛇魔剑」。
+ * 地面掉落物的名字早就走 itemNameSync() 了（world/items.ts），只有 UI 这边漏了。
+ *
+ * 表是**异步**加载的，itemAttr() 又是同步 + 带缓存，所以加载完必须调一次
+ * refreshItemNames() 把缓存清掉，否则先打开过的那些物品会一直留着英文名。
+ */
+export function refreshItemNames(): void {
+  ATTR_CACHE.clear();
+}
 
 export interface ItemAttr {
   w: number;
@@ -167,6 +188,8 @@ export interface ItemAttr {
   dura: number;
   clsMask: number;
   atkSpeed: number;
+  /** \`ItemInfo.Level\`：强化需求缩放用的物品等级 */
+  itemLevel: number;
 }
 
 /** 取物品的格子尺寸、词条与装备条件；表里没有的类型退回 1×1 + 编号 */
@@ -174,19 +197,21 @@ export function itemAttr(type: number): ItemAttr {
   const hit = ATTR_CACHE.get(type);
   if (hit) return hit;
   const row = ITEM_ATTRS[type];
+  // 名字优先用 chs/item.bmd（中文原文），静态表里的英文名当兜底
+  const localName = itemNameSync(type);
   const value: ItemAttr = row
     ? {
-        w: row[0], h: row[1], name: row[2],
+        w: row[0], h: row[1], name: localName || row[2],
         dmgMin: row[3], dmgMax: row[4], def: row[5],
         slot: row[6], reqLevel: row[7], reqStr: row[8], reqAgi: row[9],
         reqEne: row[10], reqVit: row[11], dura: row[12],
-        clsMask: row[13], atkSpeed: row[14],
+        clsMask: row[13], atkSpeed: row[14], itemLevel: row[15],
       }
     : {
-        w: 1, h: 1, name: \`Item \${type}\`,
+        w: 1, h: 1, name: localName || \`Item \${type}\`,
         dmgMin: 0, dmgMax: 0, def: 0,
         slot: -1, reqLevel: 0, reqStr: 0, reqAgi: 0, reqEne: 0, reqVit: 0,
-        dura: 0, clsMask: 0, atkSpeed: 0,
+        dura: 0, clsMask: 0, atkSpeed: 0, itemLevel: 0,
       };
   ATTR_CACHE.set(type, value);
   return value;

@@ -21,6 +21,7 @@
  * 注意面板和背包**抢同一个位置**（都在 450），所以打开战盟要关背包，反之亦然
  * —— 原版也是这么做的（`Player_InputTick.cpp` 里点背包按钮会 `GuildOpened = 0`）。
  */
+import { sfxError } from '../audio/sound';
 import type { UiLayer } from './frame';
 import { textSync } from '../data/localText';
 import { uiSprite, preloadUi } from './ozj';
@@ -521,7 +522,8 @@ export class GuildPanel {
     if (notify) this.onCreateCancel?.();
   }
 
-  toast(text: string, kind: 'ok' | 'error' | '' = '') {
+    toast(text: string, kind: 'ok' | 'error' | '' = '') {
+    if (kind === 'error') sfxError();
     this.toastEl.textContent = text;
     this.toastEl.className = `npc-toast ${kind}`.trim();
     window.clearTimeout(this.toastTimer);

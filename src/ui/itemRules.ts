@@ -23,6 +23,7 @@
  */
 import { textSync } from '../data/localText';
 import { itemAttr, EQUIP_SLOT_NAMES } from '../data/itemAttrs';
+import { itemPower, itemRequireSrv, type ItemSpec } from '../data/itemPower';
 
 /** 装备判定需要的角色数值（全部来自 0xF3/0x03） */
 export interface EquipChar {
@@ -64,9 +65,25 @@ export function classAllowed(clsMask: number, charClass: number): boolean {
 /**
  * 判定「把这件物品放到 targetSlot 能不能成功」。
  * 只用于目标槽 < 12（装备栏）；放背包格子不查任何条件。
+ *
+ * `spec` 是物品的强化/追加/卓越（`{level, option, excellent}`，直接传
+ * `InventoryItem` 也行）。需求走 `itemRequireSrv()` —— **服务端口径**，
+ * 和 tooltip 显示的客户端口径故意不同（见 `data/itemPower.ts` 的注释）。
  */
-export function checkEquip(type: number, targetSlot: number, ch: EquipChar): EquipCheck {
+export function checkEquip(
+  type: number,
+  targetSlot: number,
+  ch: EquipChar,
+  spec: number | ItemSpec = 0
+): EquipCheck {
   const attr = itemAttr(type);
+  const need = itemRequireSrv(type, spec);
+  const s = typeof spec === 'number' ? { level: spec } : spec;
+  const tags = [
+    s.level ? `+${s.level}` : '',
+    s.option ? `(追加 +${s.option})` : '',
+    s.excellent ? '(卓越)' : '',
+  ].join('');
 
   if (attr.slot < 0) {
     return { ok: false, reason: `${attr.name} 不能装备` };
@@ -77,31 +94,84 @@ export function checkEquip(type: number, targetSlot: number, ch: EquipChar): Equ
       reason: `${attr.name} 只能装备在「${EQUIP_SLOT_NAMES[attr.slot] ?? '?'}」`,
     };
   }
-  if (ch.level < attr.reqLevel) {
-    return { ok: false, reason: `等级不足：需要 ${attr.reqLevel}（当前 ${ch.level}）` };
-  }
-  if (ch.strength < attr.reqStr) {
+  if (ch.level < need.level) {
     return {
       ok: false,
-      reason: `力量不足：需要 ${attr.reqStr}（当前 ${ch.strength}，还差 ${attr.reqStr - ch.strength}）`,
+      reason: `等级不足：${attr.name}${tags} 需要 ${need.level}（当前 ${ch.level}）`,
     };
   }
-  if (ch.dexterity < attr.reqAgi) {
+  if (ch.strength < need.str) {
     return {
       ok: false,
-      reason: `敏捷不足：需要 ${attr.reqAgi}（当前 ${ch.dexterity}，还差 ${attr.reqAgi - ch.dexterity}）`,
+      reason: `力量不足：${attr.name}${tags} 需要 ${need.str}（当前 ${ch.strength}，还差 ${need.str - ch.strength}）`,
     };
   }
-  if (ch.vitality < attr.reqVit) {
-    return { ok: false, reason: `体力不足：需要 ${attr.reqVit}（当前 ${ch.vitality}）` };
+  if (ch.dexterity < need.agi) {
+    return {
+      ok: false,
+      reason: `敏捷不足：${attr.name}${tags} 需要 ${need.agi}（当前 ${ch.dexterity}，还差 ${need.agi - ch.dexterity}）`,
+    };
   }
-  if (ch.energy < attr.reqEne) {
-    return { ok: false, reason: `智力不足：需要 ${attr.reqEne}（当前 ${ch.energy}）` };
+  if (ch.vitality < need.vit) {
+    return { ok: false, reason: `体力不足：${attr.name}${tags} 需要 ${need.vit}（当前 ${ch.vitality}）` };
+  }
+  if (ch.energy < need.ene) {
+    return { ok: false, reason: `智力不足：${attr.name}${tags} 需要 ${need.ene}（当前 ${ch.energy}）` };
   }
   if (!classAllowed(attr.clsMask, ch.charClass)) {
     return { ok: false, reason: `${attr.name} 不是本职业能穿的` };
   }
   return { ok: true };
+}
+
+/**
+ * 卓越（Excellent）的逐位词条 —— 照抄 `Item_LegacyLinker.cpp:466-490` 的位映射。
+ *
+ * 卓越掩码是 6 个独立位，**不同部位映射到不同的文案**（`GlobalText` 索引见下），
+ * 这也是为什么不能像数值那样统一按 `25*Stat/Level` 处理：
+ *
+ *   防具 / 盾（192..383、424..425）    武器 / 法杖（0..191、428..429）
+ *     0x20 → 622 最大生命值 +4%         0x20 → 628 卓越攻击几率 +10%
+ *     0x10 → 623 最大魔法值 +4%         0x10 → 629 攻击力 +等级/20（法杖 631）
+ *     0x08 → 624 伤害减少 +4%           0x08 → 630 攻击力 +2%（法杖 632）
+ *     0x04 → 625 伤害反射 +5%           0x04 → 633 攻击(魔法)速度 +%d
+ *     0x02 → 626 防御成功率 +10%        0x02 → 634 杀怪回血 +生命/8
+ *     0x01 → 627 杀怪所获金 +40%        0x01 → 635 杀怪回蓝 +魔法/8
+ *
+ * 模板里的 `%%` 是 sprintf 的转义（`Camera.cpp` 那边同样是 `GL_GREATER` 那种
+ * 双写），必须折叠成单个 `%` —— 否则玩家会看到「+4%%」。
+ */
+export function excellentLines(type: number, mask = 0): string[] {
+  if (!mask) return [];
+  const isArmor = (type >= 192 && type < 384) || type === 424 || type === 425;
+  const isWeapon = (type >= 0 && type < 192) || type === 428 || type === 429;
+  if (!isArmor && !isWeapon) return [];
+
+  const isStaff = (type >= 160 && type < 192) || type === 428;
+  const out: string[] = [];
+  const add = (idx: number, arg: number | string = '') => {
+    const tpl = textSync(idx, '');
+    // 没加载到中文文本就不显示 —— 宁可少一行，也别冒出「GlobalText[622]」这种
+    if (tpl) out.push(fill(tpl, arg));
+  };
+
+  if (isArmor) {
+    if (mask & 0x20) add(622);
+    if (mask & 0x10) add(623);
+    if (mask & 0x08) add(624);
+    if (mask & 0x04) add(625);
+    if (mask & 0x02) add(626);
+    if (mask & 0x01) add(627);
+  } else {
+    if (mask & 0x20) add(628);
+    if (mask & 0x10) add(isStaff ? 631 : 629);
+    if (mask & 0x08) add(isStaff ? 632 : 630);
+    // 攻速这一条模板自带 %d，取值固定 7（`push_special(77, 7)`）
+    if (mask & 0x04) add(633, 7);
+    if (mask & 0x02) add(634);
+    if (mask & 0x01) add(635);
+  }
+  return out;
 }
 
 /**
@@ -163,16 +233,47 @@ function fill(tpl: string, ...args: Array<number | string>): string {
   return tpl.replace(/%[dsu%]/g, m => (m === '%%' ? '%' : String(args[i++] ?? '')));
 }
 
-export function itemStats(type: number): string[] {
+export function itemStats(type: number, spec: number | ItemSpec = 0): string[] {
   const a = itemAttr(type);
+  const p = itemPower(type, spec);
   const out: string[] = [];
-  // `"%s: %d ~ %d"` —— 模板本身没有占位符（`GlobalText[40]` 就是「单手攻击力」）
-  if (a.dmgMin || a.dmgMax) {
-    out.push(fill('%s: %d ~ %d', textSync(40, '单手攻击力'), a.dmgMin, a.dmgMax));
+  /*
+   * 攻击力那行的三个原版细节（`RenderItemInfo.cpp:1709-1712`）：
+   *
+   *   1. 文案按**单手 / 双手**取 `GlobalText[40]` / `[41]`
+   *      （`p->TwoHand + 40`，而服务端的 TwoHand 就是 `Width >= 2`）；
+   *   2. **法杖（160..191）的物攻要除以 2** 再显示 —— `if (type >= 160 && type <= 192)
+   *      { dmin /= 2; dmax /= 2; }`，不这么显示会比原版大一倍；
+   *   3. 法杖的 `MagicDamageRate`（Item.txt 的 MagiDmg 列）**原版 tooltip 根本不显示**
+   *      —— 整个 `RenderItemInfo` 里没有引用它。所以这里也不显示，别自作主张加一行。
+   */
+  if (p.dmgMin || p.dmgMax) {
+    const isStaff = type >= 160 && type < 192;
+    const min = isStaff ? Math.floor(p.dmgMin / 2) : p.dmgMin;
+    const max = isStaff ? Math.floor(p.dmgMax / 2) : p.dmgMax;
+    const twoHand = a.w >= 2;
+    const label = textSync(twoHand ? 41 : 40, twoHand ? '双手攻击力' : '单手攻击力');
+    out.push(fill('%s: %d ~ %d', label, min, max));
   }
   // 下面几条的模板自带 `%d`（`GlobalText[65]` =「防御力: %d」），不能再拼一遍
-  if (a.def) out.push(fill(textSync(65, '防御力: %d'), a.def));
-  if (a.atkSpeed && a.slot <= 5) out.push(fill(textSync(64, '攻击速度: %d'), a.atkSpeed));
-  if (a.def && a.slot === 1) out.push(fill(textSync(67, '防御率: %d'), a.atkSpeed));
+  if (p.def) out.push(fill(textSync(65, '防御力: %d'), p.def));
+  if (p.atkSpeed && a.slot <= 5) out.push(fill(textSync(64, '攻击速度: %d'), p.atkSpeed));
+  if (p.defRate && a.slot === 1) out.push(fill(textSync(67, '防御率: %d'), p.defRate));
+  return out;
+}
+
+/**
+ * 追加（Additional Option）词条 —— **单独几行**，不并进主属性。
+ *
+ * 原版 `RenderItemInfo` 的 SpecialNum 循环就是这么画的
+ * （`GlobalText[88..91]` 依次是 攻击 / 魔法攻击 / 防御率 / 防御）。
+ */
+export function additionalLines(type: number, spec: number | ItemSpec = 0): string[] {
+  const p = itemPower(type, spec);
+  const out: string[] = [];
+  if (p.addDmg) out.push(fill(textSync(88, '追加攻击力+%d'), p.addDmg));
+  if (p.addMagicDmg) out.push(fill(textSync(89, '追加魔法攻击力 +%d'), p.addMagicDmg));
+  if (p.addDefRate) out.push(fill(textSync(90, '追加防御率 +%d'), p.addDefRate));
+  if (p.addDef) out.push(fill(textSync(91, '追加防御力 +%d'), p.addDef));
   return out;
 }

@@ -30,6 +30,8 @@ export interface TagItem {
   focused?: boolean;
   /** 名字后面跟的 `cur/max`（原版 `Render_CharNameTags` 的 `"%s %d/%d"`） */
   hpText?: string;
+  /** 战盟名：有就在名字下面再画一行（`0x5A/0x5C` 的 `GuildName`） */
+  guild?: string;
   /**
    * 怪物血条：0..1 的连续比例（1 = 满血）。
    * 有它就画**一条实心条**（比队伍那种 10 格更适合「一眼看血量」），
@@ -43,6 +45,8 @@ type BarMode = 'none' | 'seg' | 'smooth';
 interface TagNode {
   root: HTMLDivElement;
   name: HTMLDivElement;
+  /** 战盟名（第二行）。没有盟就 `display:none`，不占位 */
+  guild: HTMLDivElement;
   bar: HTMLDivElement | null;
   segs: HTMLDivElement[];
   /** 实心条（怪物血量）的填充块，和 `segs` 二选一 */
@@ -97,6 +101,7 @@ export class WorldTags {
       mode: BarMode;
       tenths: number;
       ratio?: string;
+      guild: string;
       focused: boolean;
       visible: boolean;
       pos: [number, number];
@@ -105,6 +110,7 @@ export class WorldTags {
       out.push({
         id,
         name: n.name.textContent ?? '',
+        guild: n.guild.style.display === 'none' ? '' : (n.guild.textContent ?? ''),
         bar: !!n.bar,
         mode: n.mode,
         tenths: parseInt(n.bar?.dataset.tenths ?? '-1', 10),
@@ -144,6 +150,14 @@ export class WorldTags {
       node.name.classList.toggle('focused', !!it.focused);
       node.name.classList.toggle('foe', it.kind === 'monster');
       node.name.classList.toggle('self-party', !!it.tenths);
+      /*
+       * 战盟名：原版名字标签只画角色名，盟名是 0.97 之后才有的表现。
+       * 这里补一行小字放在名字下面 —— 数据本来就在（`0x5A/0x5C` 的 GuildName），
+       * 只是以前没人读。
+       */
+      const guild = (it.guild ?? '').trim();
+      node.guild.textContent = guild;
+      node.guild.style.display = guild ? '' : 'none';
       if (!onScreen) {
         node.root.style.display = 'none';
         continue;
@@ -223,6 +237,11 @@ export class WorldTags {
     name.className = 'wtag-name';
     root.appendChild(name);
 
+    const guild = document.createElement('div');
+    guild.className = 'wtag-guild';
+    guild.style.display = 'none';
+    root.appendChild(guild);
+
     let bar: HTMLDivElement | null = null;
     let fill: HTMLDivElement | null = null;
     const segs: HTMLDivElement[] = [];
@@ -254,7 +273,7 @@ export class WorldTags {
     }
 
     this.layer.appendChild(root);
-    n = { root, name, bar, segs, fill, mode, alive: true };
+    n = { root, name, guild, bar, segs, fill, mode, alive: true };
     this.nodes.set(it.id, n);
     return n;
   }

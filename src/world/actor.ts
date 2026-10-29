@@ -19,6 +19,8 @@ import { modelForClass } from './monsterModels';
 import { itemModelPath, type BodyGender } from './items';
 import { bodyOfClass } from '../data/equipCatalog';
 import { additiveProps } from '../core/additive';
+import { attachGlow, glowSpecFor } from './itemGlow';
+import { disposeGuildMark, guildMarkMesh, GUILD_MARK_POSE } from './guildMark';
 
 /**
  * 0.97 客户端动作索引（按 player.bmd 的数据特征 + 客户端 SetAttackSpeed 校准）：
@@ -76,9 +78,20 @@ export class Actor {
   readonly meshes: THREE.SkinnedMesh[] = [];
   /** 手持模型（武器 / 盾）。它们是骨骼的子节点，不在 meshes 里 */
   readonly props: THREE.Object3D[] = [];
+  /**
+   * 强化光效副本（见 `world/itemGlow`）。
+   *
+   * 它们和原网格**共享几何体**，所以清理时只能摘节点，绝不能 dispose 几何 ——
+   * 因此单独一个数组，不混进 `meshes`（那个数组的清理逻辑会 dispose）。
+   */
+  readonly glows: THREE.Mesh[] = [];
   readonly rig: Rig;
   /** 翅膀：自带骨架的独立模型（见 buildWing），不是主角骨架的蒙皮 */
   wing: WingHandle | null = null;
+  /** 守护 / 宠物（`Helper02` 小恶魔）：同样是独立骨架，挂在骨骼 34 */
+  helper: HelperHandle | null = null;
+  /** 战盟标志：贴在骨骼 26 上的 8×8 像素 billboard（见 `world/guildMark.ts`） */
+  guildMark: THREE.Sprite | null = null;
   name: string;
   /** 玩家 / 怪物 / NPC：动作索引与 AI 行为不同 */
   kind: 'player' | 'monster' | 'npc' = 'player';
@@ -174,6 +187,7 @@ export class Actor {
 
     applyActionPose(this.rig, this.action, this.frame, this.loop);
     this.tickWing(dt);
+    this.tickHelper(dt);
 
     this.root.position.set(this.x + CELL_CENTER, this.y + CELL_CENTER, this.z);
     this.root.rotation.set(0, 0, this.yaw);
@@ -214,6 +228,65 @@ export class Actor {
     bone.add(w.root);
   }
 
+  /* ---- 战盟标志 ----------------------------------------------------- */
+
+  /**
+   * 换/摘战盟标志。`mark` 是服务端那 32 字节（8×8 的 4bit），`null` = 没有盟。
+   *
+   * 原版 `RenderGuildMarkOnShield` 把这块 quad 画在**骨骼 26**（`Bip01 R UpperArm`）
+   * 上，位移 `(20,-5,-10)`、尺寸 `5×7`（游戏单位）。这里照抄骨骼与相对位移，
+   * 尺寸和朝向留在 `guildMark.ts::GUILD_MARK_POSE` 里，实测微调。
+   */
+  setGuildMark(mark: Uint8Array | null) {
+    if (this.guildMark) {
+      disposeGuildMark(this.guildMark);
+      this.guildMark = null;
+    }
+    if (!mark || mark.length < 32) return;
+    const mesh = guildMarkMesh(mark);
+    if (!mesh) return;
+    const bone = this.rig.bones[GUILD_MARK_POSE.bone] ?? this.rig.root;
+    mesh.position.fromArray(GUILD_MARK_POSE.offset);
+    bone.add(mesh);
+    this.guildMark = mesh;
+  }
+
+  /* ---- 守护 / 宠物 ------------------------------------------------- */
+
+  /**
+   * 挂守护（`Helper01..04`）。
+   *
+   * 原版 `Render_PlayerHelper`（`Render_PlayerEquipment.cpp:738`）只在这一种情况
+   * 下画：**helper 槽类型 == 817**（= Helper02，小恶魔 Imp）。它做三件事：
+   *
+   *   1. `LinkBone = 34` —— 挂骨骼 34（不是背骨 47，也不是手骨 33/42）
+   *   2. `PlaySpeed = 0.5` —— 动画半速播放
+   *   3. `RenderLinkObject(20, 0, 0, …)` —— 位置 (20,0,0) 游戏单位 = (0.2,0,0) 米
+   *
+   * 另外在骨骼 34 的 `(20,0,15)` 处还有个 `CreateSprite(1150)` 的小光点，
+   * 这里先不做（`world/sprites` 那套要单开一条贴图）。
+   */
+  setHelper(h: HelperHandle | null) {
+    this.helper?.root.removeFromParent();
+    this.helper = h;
+    if (!h) return;
+    // 骨骼 34 是原版写死的挂点；模型缺骨就退到根，至少别丢在原点
+    const bone = this.rig.bones[HELPER_BONE] ?? this.rig.root;
+    bone.add(h.root);
+  }
+
+  /** 守护的循环动画（和翅膀同一套：自有骨架 + 自有帧） */
+  private tickHelper(dt: number) {
+    const h = this.helper;
+    if (!h) return;
+    const keys = h.rig.bmd.actions[h.action]?.numKeys ?? 0;
+    if (keys <= 0) return;
+    const loopLen = Math.max(1, h.rig.loopLen[h.action] ?? keys);
+    h.frame += dt * h.speed * MU_REF_FPS;
+    if (h.frame >= loopLen) h.frame -= loopLen * Math.floor(h.frame / loopLen);
+    applyActionPose(h.rig, h.action, h.frame, true);
+  }
+
 
   /**
    * 骨架根节点必须进入场景图，否则骨骼矩阵不会更新；
@@ -233,6 +306,7 @@ export class Actor {
    * 手持模型挂在骨骼下，所以两边要分开摘。
    */
   setMeshes(skinned: THREE.SkinnedMesh[], props: THREE.Object3D[]) {
+    this.clearGlows();
     for (const m of this.meshes) {
       m.removeFromParent();
       m.geometry.dispose();
@@ -247,6 +321,17 @@ export class Actor {
       if (this.root.parent) this.root.parent.add(m);
     }
     for (const g of props) this.props.push(g);
+  }
+
+  /** 加一批光效副本（几何共享，只记录节点） */
+  addGlows(copies: THREE.Mesh[]) {
+    for (const c of copies) this.glows.push(c);
+  }
+
+  /** 摘掉全部光效副本。不 dispose 几何（和原网格共用） */
+  clearGlows() {
+    for (const g of this.glows) g.removeFromParent();
+    this.glows.length = 0;
   }
 
   dispose(scene: THREE.Scene) {
@@ -274,6 +359,12 @@ async function loadBmd(url: string) {
 /** 把 Actor 从场景里摘掉并释放几何体 */
 export function disposeActor(scene: THREE.Scene, actor: Actor) {
   scene.remove(actor.root);
+  // 光效副本和原网格共享几何，先摘节点再让下面的 dispose 生效
+  actor.clearGlows();
+  if (actor.guildMark) {
+    disposeGuildMark(actor.guildMark);
+    actor.guildMark = null;
+  }
   for (const mesh of actor.meshes) {
     scene.remove(mesh);
     mesh.geometry.dispose();
@@ -312,10 +403,22 @@ export interface EquipSet {
   cls?: number;
   /** 安全区：武器背在背上（`RenderCharacterBackItem` 的 Bind 条件之一） */
   safeZone?: boolean;
+  /**
+   * 各槽的**强化等级**（`CItem::m_Level`，0..15）。
+   *
+   * 0.97 的视野包 `CharSet[11]` 只带物品类型、不带强化等级，所以这个字段
+   * 只有「自己的角色」能填（来自背包 0xF3/0x10 的 `InventoryItem.level`）。
+   * 远程玩家留空 = 全部按 +0 画，和原版的行为一致（原版也只有本地角色
+   * 的 `pInventory[slot].Level` 可用）。
+   */
+  levels?: Partial<Record<EquipPartKey, number>>;
 }
 
+/** 会带强化光效的槽位（戒指/项链/守护不画外观，也就不参与） */
+export type EquipPartKey = 'weapon' | 'shield' | 'helm' | 'armor' | 'pants' | 'gloves' | 'boots' | 'wing';
+
 /** 五个身体槽 + 对应的职业默认模型前缀 */
-const CLASS_BODY: { key: 'helm' | 'armor' | 'pants' | 'gloves' | 'boots'; prefix: string }[] = [
+const CLASS_BODY: { key: EquipPartKey; prefix: string }[] = [
   { key: 'helm', prefix: 'HelmClass' },
   { key: 'armor', prefix: 'ArmorClass' },
   { key: 'pants', prefix: 'PantClass' },
@@ -336,6 +439,9 @@ const MOUNT_BONES = {
   left: { names: ['hand_bofdgne01', 'Bip01 L Hand'], index: 42 },
   back: { names: ['Bone05'], index: 47 },
 } as const;
+
+/** 会画出来的守护/宠物（精灵 / 小恶魔）；418/419 是坐骑，原版也不画 */
+const HELPER_RENDERABLE = new Set([416, 417]);
 
 export type MountSide = keyof typeof MOUNT_BONES;
 
@@ -391,7 +497,12 @@ async function loadClassBody(
 }
 
 /** 和主角同骨骼的部件（身体 / 翅膀） */
-async function buildSkinnedPart(actor: Actor, model: LoadedModel, out: THREE.SkinnedMesh[]) {
+async function buildSkinnedPart(
+  actor: Actor,
+  model: LoadedModel,
+  out: THREE.SkinnedMesh[],
+  itemLevel = 0
+) {
   const { bmd, dir, file } = model;
   const remap = createBoneRemap(bmd, actor.rig);
 
@@ -403,6 +514,8 @@ async function buildSkinnedPart(actor: Actor, model: LoadedModel, out: THREE.Ski
       bmd, mesh, actor.rig, remap, tex.texture, mb.cutout, mb.soft, mb.additive
     );
     skinned.name = `${file}:${mesh.texturePath}`;
+    // 强化等级挂在网格上，等入场景后统一建光效副本（见 applyEquipment 末尾）
+    skinned.userData.itemLevel = itemLevel;
     out.push(skinned);
   }
 }
@@ -567,9 +680,42 @@ export function applyWingPose(w: WingHandle) {
   );
 }
 
-/** 翅膀把手：自带骨架 + 扇动帧，根节点挂背骨 */
-export interface WingHandle {
+/* ------------------------------------------------------------------ */
+/* 守护 / 宠物                                                         */
+/* ------------------------------------------------------------------ */
+
+/** 原版写死的守护挂点：`Render_PlayerEquipment.cpp:741` 的 `c+0x2BC = 34` */
+const HELPER_BONE = 34;
+
+/** 守护把手：自有骨架 + 自有循环帧，根节点挂骨骼 34 */
+export interface HelperHandle {
   root: THREE.Group;
+  rig: Rig;
+  action: number;
+  frame: number;
+  /** 原版 `PlaySpeed = 0.5`（`Render_PlayerEquipment.cpp:742`） */
+  speed: number;
+}
+
+/**
+ * 守护的位置 / 播放速度。原版 `RenderLinkObject(20, 0, 0, …)` 的单位是
+ * 游戏单位（1 米 = 100），所以是 `(0.2, 0, 0)`。
+ *
+ * 如果位置看着不对，先用 `__MU_APP__.helperPose({offset:[x,y,z]})` 试，
+ * 找到合适的再写回来 —— 骨骼 34 的局部轴和世界轴不是一回事。
+ */
+export const HELPER_POSE = {
+  offset: [0.2, 0, 0] as [number, number, number],
+  speed: 0.5,
+};
+
+/** 调试用：运行时改守护姿态 */
+export function setHelperPose(p: Partial<{ offset: [number, number, number]; speed: number }>) {
+  Object.assign(HELPER_POSE, p);
+}
+
+/** 翅膀把手：自带骨架 + 扇动帧，根节点挂背骨 */
+export interface WingHandle {  root: THREE.Group;
   rig: Rig;
   /** 现在只用到 action 0（翅膀文件只有 1 个动作） */
   action: number;
@@ -701,9 +847,56 @@ async function buildWing(type: number): Promise<{ handle: WingHandle; meshes: TH
   return { handle, meshes };
 }
 
+/**
+ * 建一个守护 / 宠物（`Helper01..04`，item type 416..419）。
+ *
+ * 和翅膀一样是**自带骨架的独立模型**：BMD 里骨骼命名和 player.bmd 完全不同，
+ * 不能当主角骨架的蒙皮，只能把它的骨骼根挂到主角的骨骼 34 上。
+ * 蒙皮网格本身仍然加到场景根（`bindMatrix = identity`，蒙皮结果直接是世界坐标）。
+ */
+async function buildHelper(
+  type: number
+): Promise<{ handle: HelperHandle; meshes: THREE.SkinnedMesh[] } | null> {
+  const loaded = await loadItemBmd(type);
+  if (!loaded) return null;
+  const { bmd, dir, file } = loaded;
+
+  const rig = createRig(bmd, MODEL_SCALE);
+  const identity = (n: number) => n;
+  const meshes: THREE.SkinnedMesh[] = [];
+
+  for (const mesh of bmd.meshes) {
+    const tex = await loadTexture(dir, mesh.texturePath);
+    if (!tex) continue;
+    const mb = modelBlend(tex.texture, tex.tag === 'blend', mesh.texturePath);
+    const skinned = createSkinnedMesh(
+      bmd,
+      mesh,
+      rig,
+      identity,
+      tex.texture,
+      mb.cutout,
+      mb.soft,
+      mb.additive
+    );
+    skinned.name = `${file}:${mesh.texturePath}`;
+    meshes.push(skinned);
+  }
+  if (!meshes.length) return null;
+
+  const root = new THREE.Group();
+  root.name = 'helperRoot';
+  root.add(rig.root);
+  root.position.fromArray(HELPER_POSE.offset);
+
+  return {
+    handle: { root, rig, action: 0, frame: 0, speed: HELPER_POSE.speed },
+    meshes,
+  };
+}
+
 /** 翅膀纹理的混合方式：`.tga`（OZT）走 alpha，`.jpg`（OZJ）走加色 */
-function wingBlendOf(loaded: LoadedModel): WingBlend {
-  const tex = loaded.bmd.meshes[0]?.texturePath ?? '';
+function wingBlendOf(loaded: LoadedModel): WingBlend {  const tex = loaded.bmd.meshes[0]?.texturePath ?? '';
   return wingMode(/\.tga$/i.test(tex) ? 'blend' : 'opaque');
 }
 
@@ -775,7 +968,8 @@ async function buildHeldItem(
   actor: Actor,
   type: number,
   side: MountSide,
-  index = 0
+  index = 0,
+  itemLevel = 0
 ): Promise<THREE.Group | null> {
   const loaded = await loadItemBmd(type);
   if (!loaded) return null;
@@ -799,7 +993,11 @@ async function buildHeldItem(
       mb.additive,
       mb.soft
     );
-    for (const geo of geometries) group.add(new THREE.Mesh(geo, material));
+    for (const geo of geometries) {
+      const m = new THREE.Mesh(geo, material);
+      m.userData.itemLevel = itemLevel;
+      group.add(m);
+    }
   }
   if (!group.children.length) return null;
 
@@ -829,6 +1027,8 @@ export interface EquipmentResult {
   held: { name: string; mount: MountSide }[];
   /** 翅膀：自带骨架、自己扇；没有就是 null */
   wing: { name: string; bones: number; keys: number; blend: WingBlend } | null;
+  /** 守护 / 宠物：同样是自带骨架的独立模型，挂在骨骼 34 */
+  helper: { name: string; bones: number; keys: number } | null;
 }
 
 /**
@@ -851,16 +1051,22 @@ export async function applyEquipment(
   // 身体：有装备用装备，没装备退职业默认（永远画满 5 件，角色不再隐形）
   for (const part of CLASS_BODY) {
     const type = equip[part.key];
+    const lv = equip.levels?.[part.key] ?? 0;
     const byItem = type !== undefined ? await loadItemBmd(type, body) : null;
     const model = byItem ?? (await loadClassBody(playerDir, part.prefix, cls));
-    if (model) await buildSkinnedPart(actor, model, skinned);
+    // 职业默认身体没有强化等级（它不是「物品」），只有真装备才吃 +N
+    if (model) await buildSkinnedPart(actor, model, skinned, byItem ? lv : 0);
   }
 
   let wingInfo: EquipmentResult['wing'] = null;
   if (equip.wing !== undefined) {
     const built = await buildWing(equip.wing);
     if (built) {
-      for (const m of built.meshes) skinned.push(m);
+      const lv = equip.levels?.wing ?? 0;
+      for (const m of built.meshes) {
+        m.userData.itemLevel = lv;
+        skinned.push(m);
+      }
       actor.setWing(built.handle);
       wingInfo = {
         name: built.meshes[0]?.name ?? '',
@@ -875,18 +1081,48 @@ export async function applyEquipment(
     actor.setWing(null);
   }
 
+  // 守护 / 宠物（`Helper01..04`）。原版只在 helper 类型 == 817 时才画，
+  // 但模型路径解析（group 13 → Helper0N）对 416..419 都成立，所以这里放开，
+  // 让 816 精灵 / 818 独角兽 / 819 恐龙也能显示 —— 观感差异留给实测再调。
+  let helperInfo: EquipmentResult['helper'] = null;
+  /*
+   * 只有 416/417（Helper01 精灵 / Helper02 小恶魔）会画：它们是「跟着飞」的宠物，
+   * 自带 8 骨 7 帧的循环动画。
+   *
+   * 418/419（独角兽 / 恐龙头）是**骑乘坐骑**，原版客户端也不给它们开这条分支
+   * （`Render_PlayerHelper` 第一行 `if (helper != 817) return`，817 就是
+   * Helper02 的模型号）—— 它们只有 2 骨 1 帧的静态模型，摆在肩上会像一块板子。
+   * 骑乘本身是服务端行为（移动速度/姿态），客户端这边不画。
+   */
+  if (equip.helper !== undefined && HELPER_RENDERABLE.has(equip.helper)) {
+    const built = await buildHelper(equip.helper);
+    if (built) {
+      for (const m of built.meshes) skinned.push(m);
+      actor.setHelper(built.handle);
+      helperInfo = {
+        name: built.meshes[0]?.name ?? '',
+        bones: built.handle.rig.bones.length,
+        keys: built.handle.rig.bmd.actions[0]?.numKeys ?? 0,
+      };
+    } else {
+      actor.setHelper(null);
+    }
+  } else {
+    actor.setHelper(null);
+  }
+
   // 武器/盾：安全区背在背上，非安全区握在手里
   const onBack = equip.safeZone === true;
   const held: THREE.Object3D[] = [];
   const heldInfo: { name: string; mount: MountSide }[] = [];
   // 背挂朝向在 buildHeldItem 里按物品类判（剑不翻、盾不翻），这里只决定挂哪
-  const slots: [number | undefined, MountSide][] = [
-    [equip.weapon, onBack ? 'back' : 'right'],
-    [equip.shield, onBack ? 'back' : 'left'],
+  const slots: [EquipPartKey, number | undefined, MountSide][] = [
+    ['weapon', equip.weapon, onBack ? 'back' : 'right'],
+    ['shield', equip.shield, onBack ? 'back' : 'left'],
   ];
-  for (const [type, mount] of slots) {
+  for (const [key, type, mount] of slots) {
     if (type === undefined) continue;
-    const obj = await buildHeldItem(actor, type, mount, held.length);
+    const obj = await buildHeldItem(actor, type, mount, held.length, equip.levels?.[key] ?? 0);
     if (obj) {
       held.push(obj);
       heldInfo.push({ name: obj.name, mount });
@@ -894,7 +1130,30 @@ export async function applyEquipment(
   }
 
   actor.setMeshes(skinned, held);
-  return { skinned: skinned.map(m => m.name), held: heldInfo, wing: wingInfo };
+
+  /*
+   * 强化光效：**必须在 `setMeshes` 之后**建 —— `attachGlow` 要往「源网格
+   * 现在的父节点」上挂副本，而防具/翅膀的父节点是场景根、武器是骨骼下的
+   * group，这一步之前前者还没入场景。
+   */
+  for (const m of skinned) {
+    const lv = (m.userData.itemLevel as number) ?? 0;
+    actor.addGlows(attachGlow(m, glowSpecFor(lv)));
+  }
+  for (const g of held) {
+    // 先收集再挂：attachGlow 会往 group 里加子节点，边遍历边加容易把新副本也走一遍
+    const meshes: THREE.Mesh[] = [];
+    g.traverse(child => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.isMesh) meshes.push(mesh);
+    });
+    for (const mesh of meshes) {
+      const lv = (mesh.userData.itemLevel as number) ?? 0;
+      actor.addGlows(attachGlow(mesh, glowSpecFor(lv)));
+    }
+  }
+
+  return { skinned: skinned.map(m => m.name), held: heldInfo, wing: wingInfo, helper: helperInfo };
 }
 
 export async function createPlayer(

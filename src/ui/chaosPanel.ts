@@ -31,6 +31,7 @@
  *   3. 箱子里还有东西时**拒绝关闭**，对应原版 `ChaosBoxRequestClose`
  *      （GlobalText[593] "Close inventory after moving your items…"）。
  */
+import { sfxError } from '../audio/sound';
 import type { UiLayer } from './frame';
 import { uiSprite, preloadUi } from './ozj';
 import { itemIcon } from './itemIcon';
@@ -356,7 +357,8 @@ export class ChaosPanel {
     this.paintText();
   }
 
-  toast(text: string, kind: 'ok' | 'error' | '' = '') {
+    toast(text: string, kind: 'ok' | 'error' | '' = '') {
+    if (kind === 'error') sfxError();
     this.toastEl.textContent = text;
     this.toastEl.className = `npc-toast ${kind}`.trim();
     window.clearTimeout(this.toastTimer);
