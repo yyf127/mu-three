@@ -92,6 +92,10 @@ export class Actor {
   helper: HelperHandle | null = null;
   /** 战盟标志：贴在骨骼 26 上的 8×8 像素 billboard（见 `world/guildMark.ts`） */
   guildMark: THREE.Sprite | null = null;
+  /** 当前整体透明度（瞬移用，见 `setFade`） */
+  fadeAlpha = 1;
+  /** 淡出期间的私有材质副本（原共享材质 → 副本） */
+  private fadeMats = new Map<THREE.Mesh, { orig: THREE.Material | THREE.Material[]; own: THREE.Material }>();
   name: string;
   /** 玩家 / 怪物 / NPC：动作索引与 AI 行为不同 */
   kind: 'player' | 'monster' | 'npc' = 'player';
@@ -307,6 +311,9 @@ export class Actor {
    */
   setMeshes(skinned: THREE.SkinnedMesh[], props: THREE.Object3D[]) {
     this.clearGlows();
+    // 换装会把旧网格 dispose，淡出副本跟着失效（不释放就是材质泄漏）
+    for (const rec of this.fadeMats.values()) rec.own.dispose();
+    this.fadeMats.clear();
     for (const m of this.meshes) {
       m.removeFromParent();
       m.geometry.dispose();
@@ -321,6 +328,9 @@ export class Actor {
       if (this.root.parent) this.root.parent.add(m);
     }
     for (const g of props) this.props.push(g);
+
+    // 换装时正好在淡出（比如瞬移途中被强制换装）→ 把透明度补到新网格上
+    if (this.fadeAlpha < 0.999) this.setFade(this.fadeAlpha);
   }
 
   /** 加一批光效副本（几何共享，只记录节点） */
@@ -332,6 +342,65 @@ export class Actor {
   clearGlows() {
     for (const g of this.glows) g.removeFromParent();
     this.glows.length = 0;
+  }
+
+  /**
+   * 整体透明度 —— 瞬移（`CreateTeleportBegin/End` 的 `owner[356]`）。
+   *
+   * 源码是**硬切**：begin 时 `alpha = 0`（瞬间消失），end 时 `alpha = 1`。
+   * 所以这里不做补间，调用方给 0 / 1 就行；给中间值是留给以后做渐隐。
+   *
+   * ⚠️ 材质必须是**克隆副本**：`getBmdMaterial` 按贴图缓存共享，
+   * 直接改 `opacity` 会把所有穿同一套装备的角色一起变透明
+   * （强化染色那边已经踩过一次这个坑，见 `createPlayerSkinNpc`）。
+   * 还原时把共享材质换回去并释放副本。
+   */
+  setFade(alpha: number) {
+    const v = Math.max(0, Math.min(1, alpha));
+    this.fadeAlpha = v;
+    const restore = v >= 0.999;
+
+    const targets: THREE.Mesh[] = [];
+    const collect = (o: THREE.Object3D) =>
+      o.traverse(c => {
+        const mesh = c as THREE.Mesh;
+        if (mesh.isMesh) targets.push(mesh);
+      });
+    for (const m of this.meshes) collect(m);
+    for (const p of this.props) collect(p);
+    if (this.wing) collect(this.wing.root);
+    if (this.helper) collect(this.helper.root);
+
+    for (const mesh of targets) {
+      /*
+       * `visible` 也要一起关：这些材质大多带 `alphaTest`（BMD 的镂空靠它），
+       * 而 `alphaTest` 在部分 Three 版本里对 `opacity` 的响应不稳定 ——
+       * 实测 opacity 已经 0 了，画面上人还在。硬关 visible 最稳。
+       */
+      mesh.visible = v > 0.001;
+      const rec = this.fadeMats.get(mesh);
+      if (restore) {
+        if (!rec) continue;
+        mesh.material = rec.orig;
+        rec.own.dispose();
+        this.fadeMats.delete(mesh);
+        continue;
+      }
+      if (rec) {
+        rec.own.opacity = v;
+        rec.own.depthWrite = false;
+        continue;
+      }
+      const src = mesh.material as THREE.Material | undefined;
+      if (!src) continue;
+      const own = src.clone();
+      own.transparent = true;
+      own.opacity = v;
+      own.depthWrite = false;
+      own.userData.owned = true;
+      mesh.material = own;
+      this.fadeMats.set(mesh, { orig: src, own });
+    }
   }
 
   dispose(scene: THREE.Scene) {
@@ -359,6 +428,8 @@ async function loadBmd(url: string) {
 /** 把 Actor 从场景里摘掉并释放几何体 */
 export function disposeActor(scene: THREE.Scene, actor: Actor) {
   scene.remove(actor.root);
+  // 淡出副本是克隆出来的私有材质，缓存里那份不能碰
+  actor.setFade(1);
   // 光效副本和原网格共享几何，先摘节点再让下面的 dispose 生效
   actor.clearGlows();
   if (actor.guildMark) {

@@ -1151,3 +1151,61 @@ node tools/skill-fx-probe.mjs   38/38
 （0x19）和 `buildDurationSkillAttackPacket`（0x1E）都在，`castOnlineSkill()`
 也早就写好了，注释里还留着「以前只跑离线沙盘」的说明。
 是我用 `grep "^  [a-zA-Z]*("` 列方法名时漏掉了 `game.ts` 里的构造函数。
+
+## 二十三、瞬移的角色淡出（`CreateTeleportBegin/End` 的 alpha）
+
+上一轮把这项留成「要改 Actor 透明度管线，和特效分开算」。这一轮补上了。
+
+### 源码是硬切，不是渐隐
+
+```c
+CreateTeleportBegin(o):
+    SetAction(o, 87);
+    *(unsigned int*)(o + 356) = 0;          // alpha = 0    ← 瞬间消失
+    *(BYTE*)(o + 124) = 1;
+    CreateEffect(1176, …); PlayBuffer(88);
+
+CreateTeleportEnd(o):
+    SetAction(o, 87);                       // 同一个动作号
+    *(unsigned int*)(o + 264) = 5.0f;       // anim_speed
+    *(BYTE*)(o + 124) = 3;
+    *(unsigned int*)(o + 356) = 0x3F800000; // alpha = 1.0f ← 瞬间出现
+    CreateEffect(1176, …); PlayBuffer(88);
+```
+
+没有补间、没有曲线 —— 就是「啪」一下没了，等服务端回 `0x15` 位置更新时再「啪」一下出现。
+所以 `Actor.setFade(alpha)` 也不做插值，调用方给 0 或 1。
+
+### 实现
+
+`src/world/actor.ts::Actor.setFade(alpha)`：
+
+- 遍历 `meshes` / `props` / `wing.root` / `helper.root` 里的所有 Mesh；
+- **材质必须克隆**（`getBmdMaterial` 按贴图缓存共享，直接改 `opacity`
+  会让场上所有穿同一套装备的角色一起消失 —— 强化染色那边已经踩过一次）；
+- 同时关 `mesh.visible`：这些材质大多带 `alphaTest`（BMD 镂空靠它），
+  实测 `opacity` 已经 0 了画面上人还在，`visible` 才可靠；
+- 还原时把共享材质换回去、释放副本；`setMeshes`（换装）与 `disposeActor` 都会清理。
+
+`main.ts::teleportFade(actor)` 负责「淡出 + 0.6 s 后兜底恢复」（原版是等位置包，
+我们这边没有那个钩子）。触发点两处：
+
+- `castSkill`：`spec.action === 87` 时对 `player`（沙盘）；
+- `playRemoteSkill`：`ev.skill === 6 || 15` 时对 caster（联机，别人瞬移也看得到）。
+
+### 验证
+
+```
+node tools/skill-fx-probe.mjs   44/44（新增 G 段 6 条）
+  ✓ 平时主角是实的
+  ✓ 瞬移瞬间 alpha = 0
+  ✓ 主角网格全部透明（5 个材质都 0）
+  ✓ 别的实体不受影响（共享材质没被改）   ← 这段的重点
+  ✓ 0.6 s 后恢复不透明
+  ✓ 材质也已还原
+```
+
+截图 `shots/fade-tel.png`：角色完全消失，只剩脚下的一圈 Spark03 升腾光。
+
+新增调试口 `fadeProbe()`：返回主角当前 alpha / 各网格材质透明度，外加一个**别的实体**
+的透明度 —— 后者一直是 1 才说明没动共享材质。

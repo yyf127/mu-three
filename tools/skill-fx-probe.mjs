@@ -140,6 +140,37 @@ try {
   }
   check('截图生成（2 张）', true, '');
 
+  /* ================= G. 瞬移淡出（CreateTeleportBegin 的 alpha） ================= */
+  console.log('\n[G] 瞬移淡出（源码 alpha 0 → 1）');
+  // 上面的截图刚放过 6，先等恢复（0.6 s 兜底）
+  await sleep(900);
+  const before = JSON.parse(await c.ev(`JSON.stringify(__MU_APP__.fadeProbe())`));
+  check('平时主角是实的', before.player.alpha === 1, String(before.player.alpha));
+
+  await c.ev(`__MU_APP__.castSkill(6)`);
+  await sleep(150);
+  const during = JSON.parse(await c.ev(`JSON.stringify(__MU_APP__.fadeProbe())`));
+  check('瞬移瞬间 alpha = 0', during.player.alpha === 0, String(during.player.alpha));
+  check(
+    '主角网格全部透明',
+    (during.player.opacities ?? []).length > 0 && during.player.opacities.every(v => v === 0),
+    JSON.stringify(during.player.opacities)
+  );
+  /*
+   * 这条是这一段的重点：`getBmdMaterial` 按贴图缓存共享，淡出如果直接改
+   * `material.opacity`，场上所有穿同一套的家伙会跟着一起消失。
+   */
+  check(
+    '别的实体不受影响（共享材质没被改）',
+    (during.other?.opacities ?? []).every(v => v === 1),
+    JSON.stringify(during.other?.opacities)
+  );
+
+  await sleep(800);
+  const after = JSON.parse(await c.ev(`JSON.stringify(__MU_APP__.fadeProbe())`));
+  check('0.6 s 后恢复不透明', after.player.alpha === 1, String(after.player.alpha));
+  check('材质也已还原', (after.player.opacities ?? []).every(v => v === 1), JSON.stringify(after.player.opacities));
+
   console.log(`\n结果 ${pass} 通过 / ${fail} 失败`);
 } finally {
   await c.close();

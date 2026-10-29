@@ -7491,6 +7491,28 @@ function playCastParts(opts: {
  * 伤害没有真实战斗系统，只是拿 `skill.bmd` 里的 `Damage` 百分比折算一个数字，
  * 让「放了技能」有反馈。命中判定/减血/死亡都不在这里。
  */
+/**
+ * 瞬移的角色淡出（`CreateTeleportBegin/End` 里的 `alpha`）。
+ *
+ * 源码是**硬切**：`CreateTeleportBegin` 把 `owner[356]` 设 0（瞬间消失），
+ * 等**服务端回 0x15 位置更新**时才 `CreateTeleportEnd` 设回 1。
+ * 我们这边没有「等位置包」这个钩子，用 0.6 s 兜底 ——
+ * demo 里看起来就是「闪一下原地消失又出现」，和原版观感一致。
+ */
+const teleportFadeTimers = new WeakMap<Actor, number>();
+function teleportFade(actor: Actor) {
+  actor.setFade(0);
+  const old = teleportFadeTimers.get(actor);
+  if (old) window.clearTimeout(old);
+  teleportFadeTimers.set(
+    actor,
+    window.setTimeout(() => {
+      actor.setFade(1);
+      teleportFadeTimers.delete(actor);
+    }, 600)
+  );
+}
+
 async function castSkill(skill: SkillEntry) {
   if (!player || !world) return;
   if (playerDead) {
@@ -7572,6 +7594,11 @@ async function castSkill(skill: SkillEntry) {
   /* 2. 施法动作（`action < 0` = 源码没给，按当前武器算挥砍） */
   const act = spec.action >= 0 ? spec.action : attackAction(animInput(), attackCombo++);
   player.play(act, false);
+  /*
+   * 瞬移（6/15）：源码 `CreateTeleportBegin` 在 `SetAction(o, 87)` 的同一函数里
+   * 把 alpha 设 0，所以这里紧接着动作就淡出 —— 顺序照抄，别挪到前面。
+   */
+  if (spec.action === 87) teleportFade(player);
 
   /*
    * 召唤类技能（30..36）：正式服靠服务端建实体 + `0x1F` 下发，demo 没有服务端，
@@ -10034,6 +10061,11 @@ function playRemoteSkill(ev: SkillCastEvent, opts: { allowSelf?: boolean } = {})
       ? { actor: player, tx: playerCellX(), ty: playerCellY() }
       : null
     : (remotes.get(ev.casterId) ?? null);
+  /*
+   * 瞬移：源码 `CreateTeleportBegin` 第一件事就是把施法者 alpha 设 0。
+   * 远端的施法也走这条路（`0x19` 回包），所以放在 caster 定下来之后。
+   */
+  if (caster && (ev.skill === 6 || ev.skill === 15)) teleportFade(caster.actor);
   if (!caster) {
     skillDebug.last = { ...ev, fx: null, skipped: isSelf ? 'no-player' : 'no-caster' };
     return;
@@ -12634,6 +12666,29 @@ function boot() {
         if (p.speed !== undefined) player.helper.speed = p.speed;
       }
       return { ...HELPER_POSE };
+    },
+    /**
+     * 调试：瞬移淡出状态。
+     *
+     * `player.opacities` 是主角当前所有网格材质的透明度；
+     * `other` 随便挑一个别的实体 —— 它必须一直是 1，
+     * 否则说明淡出改了**共享材质**（`getBmdMaterial` 是按贴图缓存的）。
+     */
+    fadeProbe: () => {
+      if (!player) return null;
+      const read = (a: Actor) => {
+        const vals: number[] = [];
+        for (const m of a.meshes) {
+          const mat = m.material as THREE.Material & { opacity?: number };
+          if (mat && typeof mat.opacity === 'number') vals.push(+mat.opacity.toFixed(2));
+        }
+        return vals;
+      };
+      const other = monsters.find(a => a !== player) ?? null;
+      return {
+        player: { alpha: +player.fadeAlpha.toFixed(2), opacities: read(player) },
+        other: other ? { name: other.name, opacities: read(other) } : null,
+      };
     },
     /** 调试：最近一次技能为什么没放出来（`''` = 正常，`'mana'` / `'mana-scroll'`） */
     skillBlock: () => lastSkillBlock,
