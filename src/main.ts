@@ -273,6 +273,7 @@ import { WeaponSlamLayer, WeaponWheelLayer } from './world/wheels';
 import { MONSTER_ACTION, PLAYER_SKIN_NPCS } from './world/monsterModels';
 import { SKILL_FX, loadSkills, type SkillEntry } from './data/skills';
 import { BOW_SKILLS, castOf, sourceTag as fxTag, type CastSpec, type FxPart } from './data/skillFx';
+import { manaBlock, manaBlockText } from './data/skillMana';
 import { attachIconRenderer, itemIcon, iconDebug, clearItemIcons } from './ui/itemIcon';
 import { attachCharPreviewRenderer, charPreview } from './ui/charPreview';
 import { initLoginSkin, initCharSkin } from './ui/loginSkin';
@@ -3180,6 +3181,11 @@ const SKILL_TEST_SPOT = { gx: 186, gy: 129 };
 let skillTarget: Actor | null = null;
 /** 施法冷却（秒），防止连点刷屏 */
 let castCd = 0;
+/**
+ * 最近一次技能为什么没放出来（探针/排查用）：
+ * `''` = 正常，`'mana'` = 蓝不够且没有药，`'mana-scroll'` = 蓝不够、已喝药
+ */
+let lastSkillBlock = '';
 /**
  * 全局时间缩放（调试用）。
  *
@@ -7491,6 +7497,30 @@ async function castSkill(skill: SkillEntry) {
     sandboxPanel.setHint('角色已死亡，复活后再放技能');
     return;
   }
+
+  /*
+   * 蓝不够：源码 `Attack_UseManaScroll97k`（`Combat.cpp:869`）——
+   * 去快捷槽找**魔法药水**（`Item_FindQuickSlotByCategory(3)`）用掉，
+   * 然后**中止这次技能**。注意是「用了也不放」，不是「喝了接着放」。
+   *
+   * 沙盘（`currentChar` 为 null）不扣蓝，所以这条只在联机时生效。
+   */
+  const manaCost = skillTable.get(skill.id)?.mana ?? 0;
+  if (manaCost > 0 && currentChar?.info) {
+    /*
+     * 先只判「够不够」，够就直接往下走 —— 不要为了判断去碰背包，
+     * `useQuickSlot` 会发 0x26 并弹 toast，蓝够的时候不该有这些副作用。
+     */
+    const pre = manaBlock(manaCost, currentChar.info.mana, true);
+    if (pre) {
+      const used = useQuickSlot(1);
+      lastSkillBlock = manaBlock(manaCost, currentChar.info.mana, used);
+      // 喝了药也还是不够（药太少/加得不够）时，文案要说「已使用」而不是「没有」
+      chatBox.push('系统', manaBlockText(used ? 'mana-scroll' : 'mana', manaCost), 2);
+      return;
+    }
+  }
+  lastSkillBlock = '';
   /*
    * 这里以前是 `if (castCd > 0) return;` —— **静默返回**。
    * 沙盘是「点一下看一次」的演示工具，连续点几个技能时 0.85 s 内的点击全被吞掉，
@@ -9903,6 +9933,23 @@ function hexOf(pkt: Uint8Array): string {
  */
 function castOnlineSkill(skillId: number, targetId = 0): boolean {
   if (!connection?.connected || !player) return false;
+
+  /*
+   * 蓝不够：`Attack_UseManaScroll97k`（`Combat.cpp:869`）——
+   * 用掉一瓶魔法药，然后**中止这次施法**（不是「喝了接着放」）。
+   * 沙盘那条路在 `castSkill` 里做同样的事，这里补联机路径。
+   */
+  const manaCost = skillTable.get(skillId)?.mana ?? 0;
+  if (manaCost > 0 && currentChar?.info) {
+    if (manaBlock(manaCost, currentChar.info.mana, true)) {
+      const used = useQuickSlot(1);
+      lastSkillBlock = used ? 'mana-scroll' : 'mana';
+      chatBox.push('系统', manaBlockText(used ? 'mana-scroll' : 'mana', manaCost), 2);
+      return false;
+    }
+  }
+  lastSkillBlock = '';
+
   const gx = playerCellX() & 0xff;
   const gy = playerCellY() & 0xff;
   const tid = targetId > 0 ? targetId : focusId >= 0 ? focusId : 0;
@@ -10154,7 +10201,8 @@ function useItem(slot: number) {
  * 原版 `Item_FindQuickSlotByCategory` 是**从高往低**找第一个有货的类型
  * （大药水优先），这里照抄；三种药水混着背的时候，喝的是最贵的那个。
  */
-function useQuickSlot(index: number) {
+/** 返回 true = 真的用掉了一瓶（`Attack_UseManaScroll97k` 据此决定提示文案） */
+function useQuickSlot(index: number): boolean {
   /*
    * 先看**服务端存的槽位物品类型**（`0xF3/0x30` 的 `QKey/WKey/EKey`）。
    *
@@ -10170,12 +10218,12 @@ function useQuickSlot(index: number) {
     );
     if (exact) {
       useItem(exact.slot);
-      return;
+      return true;
     }
   }
 
   const range = QUICK_RANGES[index];
-  if (!range) return;
+  if (!range) return false;
   let hit: InventoryItem | null = null;
   for (let t = range.hi; t >= range.lo && !hit; t--) {
     hit =
@@ -10185,9 +10233,10 @@ function useQuickSlot(index: number) {
   }
   if (!hit) {
     inventoryPanel.toast('背包里没有对应的药水');
-    return;
+    return false;
   }
   useItem(hit.slot);
+  return true;
 }
 
 /**
@@ -12586,6 +12635,8 @@ function boot() {
       }
       return { ...HELPER_POSE };
     },
+    /** 调试：最近一次技能为什么没放出来（`''` = 正常，`'mana'` / `'mana-scroll'`） */
+    skillBlock: () => lastSkillBlock,
     /** 调试：战盟战比分条（离线没有 0x62/0x64，直接灌数据看版式） */
     simGuildWar: (enemy = '敌方战盟', mine = 3, theirs = 5, active = true) => {
       guildWar.active = active;
@@ -12975,6 +13026,8 @@ function boot() {
         source: spec.source,
         action: spec.action,
         parts: spec.parts.length,
+        // 探针要能断言「这一件到底是哪个文件」：`Shiny03` 和 `Earthquake02` 的区别
+        partsDetail: spec.parts.map(p => `${p.kind}:${p.file}`),
         file: skill.fx?.file ?? null,
       };
     },

@@ -43,11 +43,98 @@ export interface SkillRefine {
   add?: FxPart[];
   /** 微调源码已有的件（按 kind + file 匹配第一件） */
   patch?: Array<{ kind: FxPart['kind']; file?: string; set: Partial<FxPart> }>;
+  /**
+   * 覆盖 `castOf` 判定的来源。
+   *
+   * 默认来源是「`SKILL_CASTS` 里有没有这个技能」。但 19..23 这五招在
+   * `MoveCharacter` 里没有 `CreateEffect`，只有一句
+   * `Particle_Spawn(1232, …)` —— 提取脚本抓不到，于是被判成「兜底」。
+   * 它们的表现**是有源码依据的**（就是那颗 Shiny03 光点），标 `client`
+   * 才不会被面板打成"我们编的"。
+   */
+  source?: 'client' | 'fallback' | 'none';
   /** 这一条补充的出处 */
   note: string;
 }
 
+/**
+ * 近战五招要不要额外的模型特效。
+ *
+ * 原版**只有** `Particle_Spawn(1232 = Effect/Shiny03) `一颗光点 + 挥砍动作，
+ * 没有 Earthquake02 / Piercing / Blast01 / Storm01 / Kcross 那些模型 ——
+ * 之前那 5 件是本地挑「语义最贴」的现成资源编出来的，`source` 标的是兜底。
+ *
+ * 置 `true` 可以恢复那套「更炫但不对版」的表现（见 `skills.ts` 的 `SKILL_FX`）。
+ */
+const MELEE_EXTRA_FX = false;
+
+/** `Particle_Spawn(1232, o+16, o+28, Light, 0, 0.0f, o)` 的那颗光点 */
+function meleeSpark(note: string): FxPart[] {
+  return [
+    {
+      kind: 'sprite',
+      file: 'Effect/Shiny03.OZJ',
+      anchor: 'self',
+      count: 1,
+      size: 1.4,
+      life: 0.34,
+      lift: 1.0,
+      note,
+    },
+  ];
+}
+
+/** 19..23 的整份替换（`MELEE_EXTRA_FX = true` 时留空，走 `SKILL_FX` 那套模型） */
+const MELEE_REFINE: Record<number, SkillRefine> = MELEE_EXTRA_FX
+  ? {}
+  : {
+      19: {
+        replace: meleeSpark('地裂斩：源码只有挥砍 + Shiny03 光点'),
+        source: 'client',
+        note: '源码 UseSkillWarrior：动作 56 + Particle_Spawn(1232)',
+      },
+      20: {
+        replace: meleeSpark('牙突刺：源码只有挥砍 + Shiny03 光点'),
+        source: 'client',
+        note: '源码 UseSkillWarrior：动作 57 + Particle_Spawn(1232)',
+      },
+      21: {
+        replace: meleeSpark('升龙击：源码只有挥砍 + Shiny03 光点'),
+        source: 'client',
+        note: '源码 UseSkillWarrior：动作 58 + Particle_Spawn(1232)',
+      },
+      22: {
+        replace: meleeSpark('旋风斩：源码只有挥砍 + Shiny03 光点'),
+        source: 'client',
+        note: '源码 UseSkillWarrior：动作 59 + Particle_Spawn(1232)',
+      },
+      23: {
+        replace: meleeSpark('天地十字剑：源码只有挥砍 + Shiny03 光点'),
+        source: 'client',
+        note: '源码 UseSkillWarrior：动作 60 + Particle_Spawn(1232)',
+      },
+    };
+
 export const SKILL_REFINE: Record<number, SkillRefine> = {
+  /* ── 19..23 近战五招（Falling Slash / Lunge / Uppercut / Cyclone / Slash）
+   *
+   * 源码 `Combat/Skills_WarriorLegacy.cpp::Combat_UseWarriorSkill` 全文里
+   * 只有这三行是视觉：
+   *
+   *   SetAction(o, selectedSlot + 37);                        // 动作 56..60
+   *   float Light[3] = { 1.0f, 1.0f, 1.0f };
+   *   Particle_Spawn(1232, (float*)(o + 16), (float*)(o + 28), Light, 0, 0.0f, o);
+   *   PlayBuffer((_rand() & 1) + 0x28, 0, 0);                 // 挥砍声
+   *
+   * `1232 = Effect/Shiny03.OZJ`（`EFFECT_TEXTURES`）。也就是说原版这五招
+   * **没有模型特效**：挥砍动作 + 一颗光点 + 一声刀风。
+   *
+   * 之前 `SKILL_FX` 给它们配了 Earthquake02 / Piercing / Blast01 /
+   * Storm01 / Kcross —— 那是本地「挑一件语义最贴的现成资源」，不是原版。
+   * 现在按源码收回去（`MELEE_EXTRA_FX = true` 可恢复）。
+   */
+  ...MELEE_REFINE,
+
   /* ── 9 黑龙波（Evil Spirit）─────────────────────────────────────────
    * 源码 `SecondPassword.cpp` 的 `case 9`：
    *

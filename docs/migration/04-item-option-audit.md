@@ -1062,3 +1062,92 @@ NPC（默认把主角藏起来，否则第三人称镜头会挡住），返回�
 - 远程玩家（服务端下发的 236/247/249）也会走这条路径 —— 因为改的是
   `modelForClass()`，`remotes` 建实体时同样命中；
 - 236 的金色是染色近似，要真还原得补资源（原版 `GoldenArcher` 的 bmd + 贴图）。
+
+## 二十二、技能：按源码收回 19..23，瞬移接上动作，补技能卷轴
+
+上一轮说「13 个兜底技能的观感靠猜」。这一轮回到源码逐条对了，
+**结论是其中 5 个根本不该有模型特效**。
+
+### 19..23 近战五招：源码只有一颗光点
+
+`Combat/Skills_WarriorLegacy.cpp::Combat_UseWarriorSkill` 全函数里，视觉只有三行：
+
+```c
+SetAction(o, selectedSlot + 37);                        // 动作 56..60
+float Light[3] = { 1.0f, 1.0f, 1.0f };
+Particle_Spawn(1232, (float*)(o + 16), (float*)(o + 28), Light, 0, 0.0f, o);
+PlayBuffer((_rand() & 1) + 0x28, 0, 0);                 // 刀风
+```
+
+`1232 = Effect/Shiny03.OZJ`（`EFFECT_TEXTURES`）。**没有 Earthquake02、
+没有 Piercing、没有 Blast01/Storm01/Kcross** —— 那五个是 `SKILL_FX` 里
+「挑一件语义最贴的现成资源」，`source` 标的是兜底。
+
+现在 `SKILL_REFINE` 里给 19..23 加整份 `replace`（一颗 Shiny03），
+并把来源改判为 `client`（`SkillRefine.source` 字段）。原版近战的手感是
+**挥砍动作 + 武器拖尾 + 一颗光点**，拖尾那套我们本来就有（`trailLayer`）。
+
+> 想恢复「更炫但不对版」的表现：把 `skillFxRefine.ts` 的
+> `MELEE_EXTRA_FX` 改成 `true`，就回到 `SKILL_FX` 那 5 个模型。
+
+### 6 / 15 传送：动作是 87，不是施法 82
+
+```c
+CreateTeleportBegin(o):  SetAction(o, 87); alpha = 0;  CreateEffect(1176); PlayBuffer(88);
+CreateTeleportEnd(o):    SetAction(o, 87); alpha = 1;  CreateEffect(1176); PlayBuffer(88);
+```
+
+两个函数**动作号相同（87）**，只差 alpha 与 anim_speed。以前走默认施法 82，
+画面上是「举手施法」而不是「原地消失」。`1176 = Effect/Spark03.OZJ`，
+原来配的 `Shiny02` 已换掉。
+
+> 角色淡出（`alpha` 0/1）这一层没做：需要给 `Actor` 加整体透明度过渡，
+> 属于角色渲染管线改动，和「技能特效」分开算。
+
+### 技能卷轴（`Attack_UseManaScroll97k`）
+
+```c
+const bool lowMana = (piMana > (int)*(unsigned short*)(attr + 30));
+case 41: if (lowMana) { Attack_UseManaScroll97k(); return; }   // ← 用完也 return
+```
+
+两个关键点：
+
+1. **用了药也不放** —— 喝一瓶、等玩家再点一次，不是「自动补蓝接着放」；
+2. 药是从**快捷槽按分类**找（`Item_FindQuickSlotByCategory(3)`，3 = 魔法药），
+   不是随便哪个格子里的蓝瓶。
+
+抽成纯函数 `src/data/skillMana.ts::manaBlock(cost, mana, hasPotion)`，
+沙盘（`castSkill`）与联机（`castOnlineSkill`）两条路都接上了。
+沙盘里 `currentChar` 为 null（不扣蓝），所以只在联机时生效。
+
+### 剩下的 4 个兜底，都是「源码确实没有」
+
+| 技能 | 源码情况 | 处理 |
+| --- | --- | --- |
+| 3 掌心雷 | `case 3` 只有 `PlayBuffer(60)` + 打断目标动作，**无 `CreateEffect`** | 保留兜底（一道雷 + 火花），`note` 写明 |
+| 11 真空波 | 源码 `CreateEffect(203)` 在施法者身上生成、沿角度推进 | 改成「飞向目标」（已有 `WIZARD_FIX`） |
+| 18 圣盾防御 | `Skills.cpp` / `SecondPassword.cpp` 里**没有 case 18**，buff 类客户端无表现 | 保留 `Protect01` 光圈，标注「源码未见」 |
+| 55 玄月斩 | 有 `SKILL_REFINE`（`Tail.bmd` + 身前挥砍） | 不动 |
+
+### 验证
+
+```
+node tools/skill-fx-probe.mjs   38/38
+  A manaBlock 5 例（够 / 刚好 / 差一点有药 / 差一点没药 / 无消耗）
+  C 19..23：source=client、动作 56..59/41、各 1 件、必须是 Shiny03、
+            且**不能**再出现 Earthquake02/Piercing/Blast01/Storm01/Kcross
+  D 6/15：动作 87、部件含 Spark03
+  E cast(19) 后 spriteLayer 有存活件（轮询 1.2 s，因为 spawn 是异步的）
+  F 截图：shots/skill-{melee-19,teleport-06}.png
+```
+
+新增调试口 `skillBlock()`（最近一次技能为什么没放：`''` / `'mana'` / `'mana-scroll'`），
+`castSkill()` 返回值加了 `partsDetail`（`kind:file`），探针才能断言「到底是哪个文件」。
+
+### 顺带纠正一处我自己的误判
+
+我在动手前说「联机路径没有技能发包」——**是错的**。`buildSkillAttackPacket`
+（0x19）和 `buildDurationSkillAttackPacket`（0x1E）都在，`castOnlineSkill()`
+也早就写好了，注释里还留着「以前只跑离线沙盘」的说明。
+是我用 `grep "^  [a-zA-Z]*("` 列方法名时漏掉了 `game.ts` 里的构造函数。

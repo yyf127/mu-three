@@ -229,6 +229,15 @@ const CAST_ACTION = 82;
  * 战士的地裂斩/牙突刺/升龙击/旋风斩其实在打拳，天雷闪在挥空气。
  */
 const ACTION_BY_SKILL: Record<number, number> = {
+  /*
+   * 6 / 15 是**传送**，不是施法：
+   *   `CreateTeleportBegin(o)` → `SetAction(o, 87)`、alpha = 0（淡出）
+   *   `CreateTeleportEnd(o)`   → `SetAction(o, 87)`、alpha = 1（淡入）、anim_speed 5.0
+   * 两个函数用的**都是动作 87**，只差 alpha / 速度。以前走默认施法 82，
+   * 画面上就是"举手施法"而不是"原地消失"。
+   */
+  6: 87, // Teleport
+  15: 87, // Teleport Party（对目标 begin、对自己 end，动作号相同）
   19: 56, // Falling Slash
   20: 57, // Lunge
   21: 58, // Uppercut
@@ -831,7 +840,7 @@ const WIZARD_FIX: Record<
   },
   6: {
     source: 'fallback',
-    note: '源码 6 走 CreateTeleportBegin/End（模型上升淡出，无特效模型）→ 法阵 + 升腾光',
+    note: '源码 CreateTeleportBegin：动作 87 + alpha 0 + CreateEffect(1176=Spark03) + 音效 88',
     parts: [
       {
         kind: 'sprite',
@@ -845,22 +854,23 @@ const WIZARD_FIX: Record<
         note: '瞬移：脚下的魔法阵（原版是模型升降淡出，法阵补足瞬移感）',
       },
       {
+        // 源码那件就是 `CreateEffect(1176, …)` = Effect/Spark03.OZJ
         kind: 'sprite',
-        file: 'Effect/Shiny02.OZJ',
+        file: 'Effect/Spark03.OZJ',
         anchor: 'self',
-        count: 4,
-        size: 1.2,
-        life: 0.8,
+        count: 5,
+        size: 1.1,
+        life: 0.7,
         lift: 0.3,
         rise: 2.6,
-        spread: 0.7,
-        note: '瞬移：升腾的光（CreateTeleportBegin 的上移感）',
+        spread: 0.8,
+        note: '瞬移：源码 CreateEffect(1176=Spark03) 的升腾火花',
       },
     ],
   },
   15: {
     source: 'fallback',
-    note: '小挪移：同瞬移，范围稍大（源码同为 CreateTeleportBegin/End）',
+    note: '源码对目标 CreateTeleportBegin、对自己 CreateTeleportEnd —— 动作都是 87，特效 1176=Spark03',
     parts: [
       {
         kind: 'sprite',
@@ -874,16 +884,17 @@ const WIZARD_FIX: Record<
         note: '小挪移：脚下魔法阵',
       },
       {
+        // 源码 CreateTeleportBegin/End 都是 CreateEffect(1176) = Effect/Spark03
         kind: 'sprite',
-        file: 'Effect/Shiny02.OZJ',
+        file: 'Effect/Spark03.OZJ',
         anchor: 'self',
         count: 6,
-        size: 1.3,
-        life: 0.85,
+        size: 1.2,
+        life: 0.75,
         lift: 0.3,
         rise: 3.0,
         spread: 1.1,
-        note: '小挪移：升腾的光（范围比瞬移大）',
+        note: '小挪移：源码 CreateEffect(1176=Spark03)',
       },
     ],
   },
@@ -1032,6 +1043,8 @@ export function castOf(skill: SkillEntry): CastSpec {
    * 画成了「原地不动」。替换整份 parts，避免和上面生成的件混在一起。
    */
   let source: CastSpec['source'] = fromSource ? 'client' : 'fallback';
+  // refine 可以推翻来源判定（19..23 的表现有源码依据，只是提取脚本抓不到）
+  if (refine?.source) source = refine.source;
   const wiz = WIZARD_FIX[id];
   if (wiz) {
     parts = wiz.parts.map(p => ({ ...p }));
