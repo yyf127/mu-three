@@ -5194,6 +5194,52 @@ function applyVitalReply(head: number, pkt: Uint8Array) {
  *   3. 经验与下一级经验（`GAMESERVER_EXTRA` 长包直接给，短包才用公式算）
  *   4. 升级特效：**15 道 joint 1249 + 光环 1264**（`Net_Process.cpp:2373-2385`）
  */
+/**
+ * 造一个 `0xF3/0x05`（`PMSG_LEVEL_UP_SEND`）回包，给调试口模拟升级/转生用。
+ *
+ * 结构：`C1 [size] F3 05` + 8 个 WORD（Level/Point/MaxLife/MaxMana/MaxBP/
+ * FruitAdd/MaxFruitAdd/FruitSub/MaxFruitSub 里的前 5 个 + 3 个果实字段）
+ * + 6 个 DWORD（`GAMESERVER_EXTRA` 那段：Point/HP/MP/BP/Experience/NextExp）。
+ * 必须凑够 48 字节，否则 `parseLevelUp` 不会读扩展段。
+ */
+function makeLevelUpPacket(
+  level: number,
+  point: number,
+  maxLife: number,
+  maxMana: number,
+  maxBp: number,
+  experience: number,
+  nextExperience: number
+): Uint8Array {
+  const pkt = new Uint8Array(48);
+  pkt[0] = 0xc1;
+  pkt[1] = 48;
+  pkt[2] = 0xf3;
+  pkt[3] = 0x05;
+  const w16 = (o: number, v: number) => {
+    pkt[o] = v & 0xff;
+    pkt[o + 1] = (v >> 8) & 0xff;
+  };
+  const w32 = (o: number, v: number) => {
+    pkt[o] = v & 0xff;
+    pkt[o + 1] = (v >> 8) & 0xff;
+    pkt[o + 2] = (v >> 16) & 0xff;
+    pkt[o + 3] = (v >> 24) & 0xff;
+  };
+  w16(4, level);
+  w16(6, point);
+  w16(8, maxLife);
+  w16(10, maxMana);
+  w16(12, maxBp);
+  w32(24, point);
+  w32(28, maxLife);
+  w32(32, maxMana);
+  w32(36, maxBp);
+  w32(40, experience);
+  w32(44, nextExperience);
+  return pkt;
+}
+
 function applyLevelUp(pkt: Uint8Array) {
   const ev = parseLevelUp(pkt);
   if (!ev) return;
@@ -5219,8 +5265,15 @@ function applyLevelUp(pkt: Uint8Array) {
   }
 
   refreshHud();
-  playLevelUpFx();
-  if (player) {
+  /*
+   * 升级特效只在**真的升级**时播。
+   *
+   * 转生（`/reset`）走的是同一个回执包：服务端把等级从 400 改回 1，然后
+   * `GCLevelUpSend`。原样播就会在转生瞬间闪一圈金光 +「LEVEL 1」，看着像掉级。
+   */
+  const leveledUp = ev.level > before;
+  if (leveledUp) playLevelUpFx();
+  if (player && leveledUp) {
     damageTexts.spawn(
       { x: player.x, y: player.y, z: player.z + 2.8 },
       `LEVEL ${ev.level}`,
@@ -5229,7 +5282,9 @@ function applyLevelUp(pkt: Uint8Array) {
   }
   chatBox.push(
     '系统',
-    `等级提升！Lv ${before || '?'} → ${ev.level}（可分配点 ${ev.levelUpPoint}）`,
+    leveledUp
+      ? `等级提升！Lv ${before || '?'} → ${ev.level}（可分配点 ${ev.levelUpPoint}）`
+      : `等级已重置为 Lv ${ev.level}（转生后从 1 级重新升，可分配点 ${ev.levelUpPoint}）`,
     2
   );
   console.log(
@@ -5603,9 +5658,26 @@ let grandResetCount = 0;
 
 function applyCharacterExtra(info: {
   level: number;
+  levelUpPoint: number;
+  experience: number;
   reset: number;
   grandReset: number;
 }) {
+  /*
+   * 等级/经验也要跟着走：转生（`/reset`）把等级从 400 改成 1，服务端会补一包
+   * `GCLevelUpSend`（`0xF3/0x05`），正常由 `applyLevelUp` 落地；但 E0 本身
+   * 就带 `Level` / `LevelUpPoint` / `Experience`，这里兜一次底 ——
+   * 万一哪条路径只发 E0，面板不会还停在 400 级。
+   */
+  if (currentChar && info.level > 0 && currentChar.level !== info.level) {
+    currentChar.level = info.level;
+    if (currentChar.info) {
+      currentChar.info.experience = info.experience;
+      currentChar.info.levelUpPoint = info.levelUpPoint;
+    }
+    refreshHud();
+  }
+
   const changed = info.reset !== resetCount || info.grandReset !== grandResetCount;
   resetCount = info.reset;
   grandResetCount = info.grandReset;
@@ -12254,6 +12326,41 @@ function boot() {
       return bytes.length;
     },
     /** 调试：模拟一份 `0xF3/0xE1` 属性包，验证角色面板是否优先用服务端值 */
+    /**
+     * 调试：模拟一次 `/reset` 的服务端回执序列。
+     *
+     * 服务端顺序是 `GCNewCharacterInfoSend`（E0，带新等级/转生数）→
+     * `GCLevelUpSend`（F3/05，带 Level=1）。离线沙盘没有 socket，这里直接
+     * 喂两个解析好的结构，验「等级回 1、不掉升级特效、文案是转生」。
+     */
+    simReset: (fromLevel = 400) => {
+      if (!currentChar) return null;
+      const before = currentChar.level;
+      currentChar.level = fromLevel;
+      applyLevelUp(makeLevelUpPacket(1, 0, 120, 40, 30, 0, calcNextLevelExp(1)));
+      applyCharacterExtra({
+        level: 1,
+        levelUpPoint: 0,
+        experience: 0,
+        reset: resetCount + 1,
+        grandReset: grandResetCount,
+      });
+      return {
+        before,
+        after: currentChar.level,
+        reset: resetCount,
+        chat: chatBox.snapshot().lines.slice(-2).map(l => l.text),
+      };
+    },
+    /** 调试：模拟一次普通升级回执（验「升级」与「转生」文案/特效分流） */
+    simLevelUp: (level: number) => {
+      if (!currentChar) return null;
+      applyLevelUp(makeLevelUpPacket(level, 5, 200, 60, 40, 0, calcNextLevelExp(level)));
+      return {
+        level: currentChar.level,
+        chat: chatBox.snapshot().lines.slice(-1).map(l => l.text),
+      };
+    },
     charCalc: (calc: Record<string, number> | null) => {
       if (!calc) {
         characterPanel.setCalc(null);

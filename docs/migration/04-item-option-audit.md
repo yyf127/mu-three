@@ -813,3 +813,87 @@ node tools/guild-mark-probe.mjs   11/11
 （`gMessage` 58/59/76），成功时也只发一条公告，没有结构化回执。
 要做「转生界面（显示当前次数 + 下次所需等级/金币）」必须改协议并重编 GameServer，
 不在客户端能解决的范围内。
+
+## 十九、转生（`/reset`）到底做了什么
+
+用户问：「满级转生会降回 1 级，但属性还是满级，之后再升级把点加回来 —— 是不是这样？」
+
+**是的，而且这是配置决定的**，不是客户端表现。链路是：
+
+```
+/reset → CCommandManager::CommandReset（校验等级/钱/次数）
+       → DataServer WZ_GetResetInfo（当日/周/月次数）
+       → DGCommandResetRecv（真正落地）
+```
+
+`DGCommandResetRecv`（`CommandManager.cpp:1058`）做的事：
+
+| # | 动作 | 配置项 | 本服取值 |
+| --- | --- | --- | --- |
+| 1 | 扣钱 | `CommandResetMoney` | 0（免费） |
+| 2 | `Level = CommandResetStartLevel` | `CommandResetStartLevel` | **1** |
+| 3 | `Experience = gLevelExperience[Level-1]` | — | 1 级起点 |
+| 4 | `Reset += CommandResetCount` | `CommandResetCount` | +1 |
+| 5 | 清未分配点 + 四项属性 | `CommandResetStat` | **0 = 不清** |
+| 6 | 清任务 / 清技能 | `CommandResetQuest` / `CommandResetSkill` | 0 / 0 |
+| 7 | 回安全区（`gObjMoveGate(17)`=洛兰） | `CommandResetMove` | 1 |
+| 8 | `CharacterCalcAttribute` → 重算上限与 `NextExperience` | — | — |
+
+**关键就是第 5 行**：`CommandResetStat_AL*=0`，于是这一整段被跳过 ——
+
+```cpp
+if (gServerInfo.m_CommandResetStats[...] != 0) {
+    lpObj->LevelUpPoint = point;       // 重新给一大堆点
+    lpObj->Strength  = 职业初始值;      // 属性归零
+    ... Dexterity / Vitality / Energy
+}
+```
+
+所以本服转生后：**等级 1、属性原封不动（还是满级那套）、未分配点也留着**。
+之后从 1 级重新升，每级继续加 `DW/DK/FE=5`、`MG=7` 点
+（`Common.dat` 的 `*LevelUpPoint`），升回 400 级就是再拿 ~1995 点 ——
+这正是「属性点再加回来」。
+
+需要完全重置（经典转生）就把 `CommandResetStat_AL*` 改成 1：那样属性回到职业初始值，
+但 `LevelUpPoint` 会被重算成 `ResetPoint + (Level-1)×每级点 + 果实点`，玩家重新加。
+
+### 顺手记两个坑
+
+1. **`CommandResetStartLevel = -1` 那行是写反的**：
+   ```cpp
+   lpObj->Level = (m_CommandResetStartLevel == -1)
+       ? (lpObj->Level - m_CommandResetStartLevel)   // -1 时等于 等级 +1
+       : m_CommandResetStartLevel;
+   ```
+   本意大概是「保持等级」，实际会升一级。当前配置是 1，走 else 分支，无影响；
+   但要改成 -1 之前必须先修这行。
+2. **`NextExperience` 靠 `CharacterCalcAttribute` 里的 `gObjCalcExperience` 重算**，
+   不是转生代码自己设的 —— 所以第 8 步不能省，否则 1 级要打满 400 级的经验才升 2 级。
+
+### 客户端侧：一处错乱，已修
+
+转生回执走的是 `GCLevelUpSend`（`0xF3/0x05`），和普通升级**同一个包**，
+所以之前转生瞬间会闪一圈升级金光 +「LEVEL 1」飘字 + 聊天「等级提升！Lv 400 → 1」。
+
+现在按 `ev.level > before` 分流：
+
+- 真升级：`playLevelUpFx()` + `LEVEL n` 飘字 + 「等级提升！」；
+- 等级下降（转生）：不播特效，聊天给「等级已重置为 Lv 1（转生后从 1 级重新升，可分配点 N）」。
+
+另外 `applyCharacterExtra`（`0xF3/0xE0`）原来只吃 `reset/grandReset`，
+现在也兜底更新 `level / levelUpPoint / experience` —— E0 里本来就带这三个字段，
+万一某条路径只发 E0，面板不会还停在 400 级。
+
+### 验证
+
+```
+node tools/reset-probe.mjs   21/21
+  A 配置：400 级 / 回 1 级 / 免费 / +1 次 / Stat=0 / 回安全区
+  B 代码：等级与经验赋值、Reset 累加、「清属性」被 Stat 包住、
+          之后 CharacterCalcAttribute、E0 在 F3/05 之前
+  C 客户端：等级回 1、转生 +1、文案「等级已重置」且不含「等级提升」
+  D 对照：普通升级仍显示「等级提升」
+```
+
+新增调试口：`simReset(fromLevel)`（模拟一次转生回执）、`simLevelUp(level)`
+（模拟一次普通升级）、`demoChar(name)`（走演示角色卡进图，`/demo` 需要先点「进入游戏」）。
