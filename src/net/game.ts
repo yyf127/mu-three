@@ -3087,10 +3087,20 @@ export function parseGuildWarEnd(pkt: Uint8Array): { result: number; name: strin
   return { result: pkt[3], name: readName(pkt, 4, 8) };
 }
 
-/** 下行 0x64：战盟战比分（`C1 05 64 score[2]`，big-endian 16 位） */
-export function parseGuildWarScore(pkt: Uint8Array): { score: number } | null {
+/**
+ * 下行 0x64：战盟战比分（`PMSG_GUILD_WAR_SCORE_SEND`，`Guild.h:317`）。
+ *
+ * 结构是 `BYTE score[2]` —— **两个字节各算一方的分**，不是 16 位大端：
+ *
+ *   score[0] = 自己公会 `Guild->PlayScore`
+ *   score[1] = 对手公会 `TargetGuildNode->PlayScore`
+ *
+ * 以前按 `(pkt[3] << 8) | pkt[4]` 合成一个数，等于把 3:5 读成 775。
+ * 服务端字段只有 BYTE，所以分数上限 255（封印/足球赛打不了那么高）。
+ */
+export function parseGuildWarScore(pkt: Uint8Array): { mine: number; theirs: number } | null {
   if (pkt[0] !== 0xc1 || pkt[2] !== 0x64 || pkt.length < 5) return null;
-  return { score: (pkt[3] << 8) | pkt[4] };
+  return { mine: pkt[3], theirs: pkt[4] };
 }
 
 /* ---------------- 标志（8×8 像素，32 字节打包） ---------------- */

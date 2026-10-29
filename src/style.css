@@ -884,6 +884,47 @@ button.small {
   text-shadow: 0 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.85);
 }
 
+/* 战盟战比分条（原版 Render_CharInfoPanel_ 的 EnableGuildWar 分支） */
+.gwar {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  pointer-events: none;
+  white-space: nowrap;
+  text-shadow: 0 1px 2px #000, 0 0 4px rgba(0, 0, 0, 0.85);
+}
+
+.gwar-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  line-height: 15px;
+}
+
+/* 原版：我方绿 0xFF008000 / 对方橙 0xFFFF9560 */
+.gwar-row.mine {
+  color: #6fe06f;
+}
+
+.gwar-row.theirs {
+  color: #ffb27a;
+}
+
+.gwar-mark {
+  width: 10px;
+  height: 10px;
+  image-rendering: pixelated;
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.gwar-score {
+  min-width: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 /* 战盟名：名字下面第二行小字（0.97 之后才有的表现，颜色取偏青灰） */
 .wtag-guild {
   font-size: 10px;

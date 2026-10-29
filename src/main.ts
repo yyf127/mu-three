@@ -243,6 +243,7 @@ import { EventPanel } from './ui/eventPanel';
 import { GoldenArcherPanel, formatLucky } from './ui/goldenArcherPanel';
 import { SkillBar, type SkillBarEntry } from './ui/skillBar';
 import { GuildPanel } from './ui/guildPanel';
+import { GuildWarBar } from './ui/guildWarBar';
 import { checkMixRecipe, MIX_LABEL, mixErrorText } from './data/chaosRecipe';
 import { loadQuests, questStateFromMask, setQuestStateInMask, type QuestData, type QuestDef } from './data/quests';
 import { EffectLayer } from './world/effects';
@@ -628,6 +629,9 @@ function leaveGame(target: 'login' | 'charselect', f1Sub: 0 | 1 | 2, note: strin
   focusId = -1;
   playerDead = false;
   escMenu.hide();
+  // 战盟战比分条跟着退出：不然回选角界面还挂在顶上
+  guildWar.active = false;
+  guildWarBar.hide();
 
   /*
    * 演示模式没有 socket 要关，但沙盘/角色要复位：不然回到选角再进图时
@@ -748,6 +752,25 @@ void loadTextPool();
  * 面板坐标直接抄客户端源码（见 src/ui/inventory.ts 的注释），不做自适应重排。
  */
 const uiLayer = new UiLayer(stageEl);
+
+/** 战盟战比分条（原版 `Render_CharInfoPanel_` 的 EnableGuildWar 分支） */
+const guildWarBar = new GuildWarBar(uiLayer);
+/** 战盟战状态：`0x62` 开、`0x64` 更新比分、`0x63` 收 */
+const guildWar = { active: false, mineName: '', theirsName: '', mine: 0, theirs: 0 };
+/** 自己的盟标（32 字节），比分条左上那格用它 */
+let selfGuildMark: Uint8Array | null = null;
+
+function refreshGuildWarBar() {
+  guildWar.mineName = selfGuildName;
+  guildWarBar.set(
+    {
+      active: guildWar.active,
+      mine: { name: guildWar.mineName, score: guildWar.mine },
+      theirs: { name: guildWar.theirsName, score: guildWar.theirs },
+    },
+    selfGuildMark
+  );
+}
 
 /*
  * 界面「叮」声（`PlayBuffer(0x19)` = `iButtonClick.wav`）。
@@ -2880,7 +2903,11 @@ function sendChatText(text: string): boolean {
    * `Chat_TrySendPartyRequest`），作用对象是**面前的玩家**；也可以 `/party 名字`
    * 指定视野里的人。服务端 `CGPartyRequestRecv` 自己校验等级/人数/是否已在队伍。
    */
-  const partyCmd = /^\/party(?:\s+(.+))?$/i.exec(text.trim());
+  /*
+   * `/pt` 是 `/party` 的别名 —— 原版客户端两个都拦
+   * （`Chat_CommandParser.cpp:46` 的 strstr 表里同时有 "/party" 和 "/pt"）。
+   */
+  const partyCmd = /^\/(?:party|pt)(?:\s+(.+))?$/i.exec(text.trim());
   if (partyCmd) return partyInvite(partyCmd[1]?.trim());
   session.sendChat(currentChar.name, text);
   return true;
@@ -3977,14 +4004,31 @@ async function connectAndLogin(account: string, password: string) {
         const w = parseGuildWarStart(pkt);
         if (w) {
           chatBox.push('战盟', `【战盟战】与 ${w.name} 开战（${w.team === 0 ? '蓝队' : '红队'}）`, 1);
+          guildWar.active = true;
+          guildWar.theirsName = w.name;
+          guildWar.mine = 0;
+          guildWar.theirs = 0;
+          refreshGuildWarBar();
           connection?.send(buildGuildWarAnswerPacket(1));
         }
       } else if (head === 0x63 && pkt[0] === 0xc1) {
         const w = parseGuildWarEnd(pkt);
-        if (w) chatBox.push('战盟', `【战盟战】与 ${w.name} 结束（result=${w.result}）`, 1);
+        if (w) {
+          chatBox.push(
+            '战盟',
+            `【战盟战】与 ${w.name} 结束（${guildWar.mine} : ${guildWar.theirs}，result=${w.result}）`,
+            1
+          );
+          guildWar.active = false;
+          refreshGuildWarBar();
+        }
       } else if (head === 0x64 && pkt[0] === 0xc1) {
         const w = parseGuildWarScore(pkt);
-        if (w) chatBox.push('战盟', `【战盟战】当前比分 ${w.score}`, 1);
+        if (w) {
+          guildWar.mine = w.mine;
+          guildWar.theirs = w.theirs;
+          refreshGuildWarBar();
+        }
       } else if (head === 0x94 && pkt[0] === 0xc1) {
         /*
          * 0x94 打开收集器界面。**服务端不发 0x30** —— 对话 NPC 236 之后
@@ -8267,6 +8311,8 @@ let selfGuildName = '';
 remotes.onSelfGuild = (mark, name) => {
   player?.setGuildMark(mark);
   selfGuildName = name ?? '';
+  selfGuildMark = mark ? mark.slice() : null;
+  refreshGuildWarBar();
 };
 
 /* 服务端下发的伤害 → 飘字；死亡 → 经验 */
@@ -10108,6 +10154,25 @@ function useItem(slot: number) {
  * （大药水优先），这里照抄；三种药水混着背的时候，喝的是最贵的那个。
  */
 function useQuickSlot(index: number) {
+  /*
+   * 先看**服务端存的槽位物品类型**（`0xF3/0x30` 的 `QKey/WKey/EKey`）。
+   *
+   * 原版那三个字节存的是「这个键绑定的药水类型 + 64」（`opt[11] = type + 64`），
+   * 所以减 64 还原。玩家在老客户端上配过 Q/W/E 的话，换到网页端也照他那套喝；
+   * 没配过（0 / <64）或者背包里正好没有那种，退回按分类找。
+   */
+  const rawKey = index === 0 ? serverOption?.qKey : index === 1 ? serverOption?.wKey : serverOption?.eKey;
+  const bound = rawKey && rawKey >= 64 ? rawKey - 64 : 0;
+  if (bound) {
+    const exact = inventoryItems.find(
+      i => i.slot >= INVENTORY_WEAR_SIZE && i.type === bound && (i.durability || 0) > 0
+    );
+    if (exact) {
+      useItem(exact.slot);
+      return;
+    }
+  }
+
   const range = QUICK_RANGES[index];
   if (!range) return;
   let hit: InventoryItem | null = null;
@@ -12448,6 +12513,15 @@ function boot() {
         if (p.speed !== undefined) player.helper.speed = p.speed;
       }
       return { ...HELPER_POSE };
+    },
+    /** 调试：战盟战比分条（离线没有 0x62/0x64，直接灌数据看版式） */
+    simGuildWar: (enemy = '敌方战盟', mine = 3, theirs = 5, active = true) => {
+      guildWar.active = active;
+      guildWar.theirsName = enemy;
+      guildWar.mine = mine;
+      guildWar.theirs = theirs;
+      refreshGuildWarBar();
+      return guildWarBar.snapshot();
     },
     /** 调试：主角骨架的「序号:骨骼名」列表（找挂点用，比如盾牌骨骼 26） */
     bones: () => (player ? player.rig.bones.map((b, i) => `${i}:${b.name}`) : []),
