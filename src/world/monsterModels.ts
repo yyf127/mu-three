@@ -75,28 +75,11 @@ const NPC_INDEX_BY_CLASS: Record<number, number> = {
   254: 339,
   255: 335,
   /*
-   * 下面三个在原版客户端里**不是普通 NPC 模型**，走的是
-   * `CreateChar5(Key, 390, …)`（玩家骨架 + 硬编码装备外观）：
-   *
-   *   Monster.cpp:1245  case 236: OpenNpc(390); CreateChar5(Key, 390, …)  ← 黄金弓箭手
-   *   Monster.cpp:1299  case 247: CreateChar5(Key, 390, …)               ← 守卫
-   *   Monster.cpp:1318  case 249: CreateChar5(Key, 390, …)               ← Berdysh Guard
-   *
-   * `OpenNpc(390)` 在 `NPC_ModelLoad.cpp` 的 switch 里没有对应分支
-   * （那份反编译只到 0x176），`Data/Npc` 下也没有 GoldenArcher 的 bmd，
-   * 所以本 port 先给它们**替身模型**，保证「人站在那儿」看得见：
-   *
-   *   236 黄金弓箭手（NPC，女性）→ `Sevina01`（精灵女性）
-   *   247 / 249 城门守卫（重甲士兵）→ `Man01`（男装），配合缩放看着像守卫
-   *
-   * TODO 真正的做法是新增「NPC 用玩家外观」这条路径（charSet + 装备槽），
-   *      能一次把 236/247/249 全部还原成原版样子。
+   * 236 / 247 / 249 不在这张表里 —— 它们走「玩家骨架 + 装备」，
+   * 见下面的 `PLAYER_SKIN_NPCS`（原版 `CreateChar5(Key, 390, …)`，
+   * 390 = 0x186 = player.bmd 的模型槽）。
    */
-  236: 374,
-  247: 336,
-  249: 336,
 };
-
 
 /**
  * Class → 怪物名（取服务端 `MonsterSetBase.txt` 的注释列）。
@@ -196,6 +179,85 @@ export const NPC_NAMES: Record<number, string> = {
   255: 'Lumen the Barmaid',
 };
 
+/**
+ * 「用玩家骨架 + 装备槽」的 NPC。
+ *
+ * 原版 `CreateMonster` 里 236/247/249 走的是 `CreateChar5(Key, 390, …)` ——
+ * 390 = 0x186 = **player.bmd 的模型槽**（`Model_Items.cpp` 的
+ * `AccessModel(0x186, "Data\\Player\\", "Player", -1)`），
+ * 所以这三个人形 NPC 本质上就是「玩家骨架 + 硬编码装备」。
+ *
+ * 部件偏移（每 24 字节一个槽，`Monster.cpp:1299`）：
+ *
+ * ```
+ * c+504 Helm  c+528 Armor  c+552 Pant  c+576 Glove  c+600 Boot
+ * c+624 Weapon  c+648 Shield
+ * ```
+ *
+ * 模型槽号 → 物品类型只需减 400（`AccessModel(i + 0x26f, "HelmMale", i)`
+ * 与 `SLOT_FILES` 的 `type + 400` 是同一套）：
+ *
+ * | 槽号 | 文件 | 物品类型 |
+ * | --- | --- | --- |
+ * | 633 / 665 / 697 / 729 / 761 | HelmMale10 / ArmorMale10 / PantMale10 / GloveMale10 / BootMale10 | 233 / 265 / 297 / 329 / 361（Plate 板甲五件） |
+ * | 539 | CrossBow04 | 139 |
+ * | 535 | Arrows01 | 135 |
+ * | 503 | Spear09 | 103 |
+ */
+export interface PlayerSkin {
+  /** 装备槽（物品类型），没写的槽不画装备 */
+  equip: {
+    helm?: number;
+    armor?: number;
+    pants?: number;
+    gloves?: number;
+    boots?: number;
+    weapon?: number;
+    shield?: number;
+  };
+  /**
+   * 覆盖身体贴图。原版 `case 236` 里 `*(unsigned int*)(c + 4) = 207`
+   * 就是「换一张皮肤」。
+   *
+   * 用 `skin_archer_01`（`Model_Monsters.cpp:24` 的 `OpenJPG(..., 0x131)`）：
+   * 那是弓箭手专用的金色皮甲贴图，采样下来 48% 的像素落在「金」色域，
+   * 而 `guard_gold2` 其实是守卫的腰布（深灰褐，gold 仅 5%），套上去只会更黑。
+   */
+  skinTex?: { dir: string; file: string };
+  /**
+   * 装备材质染色（与贴图相乘）。原版的黄金守卫是**专用模型 + 专用贴图**，
+   * 这份资源包里没有（`skin_archer_01` 没有任何 bmd 引用它，套到 Plate 的
+   * UV 上是错乱的），所以用乘法染色把板甲压成暗金铜色 —— 是近似，
+   * 不是逐像素还原。
+   */
+  tint?: number;
+  /** 体型：精灵装备走 Elf 系列文件名，其余 Male */
+  body?: 'Male' | 'Elf';
+}
+
+/**
+ * 玩家骨架 NPC 的外观表（原版 `Monster.cpp:1245/1299/1318`）。
+ *
+ * - **236 黄金弓箭手**：`c+4 = 207` 换皮（`guard_gold2.OZJ`）+ `c+446 = 8`
+ *   动作组。原版没写装备槽，但 `CreateCharacterPointer` 会按 Type=390 填一套
+ *   默认部件；这里按截图（金色全身板甲 + 弓）取 Plate 五件 + CrossBow04，
+ *   靠 `skinTex` 把五件的贴图统一换成金色那张；
+ * - **247 Archer Guard**：Plate 五件 + CrossBow04 + Arrows01（左手那袋箭）；
+ * - **249 Berdysh Guard**：Plate 五件 + Spear09，没有盾。
+ */
+export const PLAYER_SKIN_NPCS: Record<number, PlayerSkin> = {
+  236: {
+    equip: { helm: 233, armor: 265, pants: 297, gloves: 329, boots: 361, weapon: 139 },
+    tint: 0xf0b24a,
+  },
+  247: {
+    equip: { helm: 233, armor: 265, pants: 297, gloves: 329, boots: 361, weapon: 139, shield: 135 },
+  },
+  249: {
+    equip: { helm: 233, armor: 265, pants: 297, gloves: 329, boots: 361, weapon: 103 },
+  },
+};
+
 export interface ModelRef {
   /** 'monster' → Data/Monster、'npc' → Data/NPC */
   dir: 'monster' | 'npc';
@@ -204,6 +266,8 @@ export interface ModelRef {
   /** 附加部件（只有人形 NPC 需要：头/上身/腿/鞋） */
   parts: string[];
   name: string;
+  /** 有值 = 用 player.bmd 骨架 + 这套装备（见 `PLAYER_SKIN_NPCS`） */
+  player?: PlayerSkin;
 }
 
 /**
@@ -248,6 +312,22 @@ const NPC_PARTS: Record<string, string[]> = {
  * Class → 模型。没有模型的 Class（守卫、Golden Archer 等）返回 null。
  */
 export function modelForClass(cls: number): ModelRef | null {
+  /*
+   * 玩家骨架 NPC（236 黄金弓箭手 / 247 Archer Guard / 249 Berdysh Guard）。
+   * 原版是 `CreateChar5(Key, 390)` + 硬编码装备槽，所以这里给个 `player` 标记，
+   * 由 `createCreatureByClass` 换一条加载路径（player.bmd 骨架 + applyEquipment）。
+   */
+  const skin = PLAYER_SKIN_NPCS[cls];
+  if (skin) {
+    return {
+      dir: 'npc',
+      base: 'player.bmd',
+      parts: [],
+      name: npcNameOfClass(cls) || NPC_NAMES[cls] || `NPC ${cls}`,
+      player: skin,
+    };
+  }
+
   const npcIndex = NPC_INDEX_BY_CLASS[cls];
   if (npcIndex !== undefined) {
     const file = NPC_MODEL_BY_INDEX[npcIndex];

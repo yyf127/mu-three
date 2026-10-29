@@ -15,8 +15,8 @@ import {
 } from '../core/model';
 import { fetchBytes, loadTexture } from '../core/texture';
 import { modelBlend } from '../core/blendHeuristic';
-import { modelForClass } from './monsterModels';
-import { itemModelPath, type BodyGender } from './items';
+import { modelForClass, type ModelRef } from './monsterModels';
+import { itemModelPath, PLAYER_DIR, type BodyGender } from './items';
 import { bodyOfClass } from '../data/equipCatalog';
 import { additiveProps } from '../core/additive';
 import { attachGlow, glowSpecFor } from './itemGlow';
@@ -368,6 +368,9 @@ export function disposeActor(scene: THREE.Scene, actor: Actor) {
   for (const mesh of actor.meshes) {
     scene.remove(mesh);
     mesh.geometry.dispose();
+    // 染色时克隆出来的「私有材质」要单独释放；缓存共享的那份不能碰
+    const mat = mesh.material as THREE.Material & { userData?: { owned?: boolean } };
+    if (mat?.userData?.owned) mat.dispose();
   }
   actor.meshes.length = 0;
 }
@@ -412,6 +415,8 @@ export interface EquipSet {
    * 的 `pInventory[slot].Level` 可用）。
    */
   levels?: Partial<Record<EquipPartKey, number>>;
+  /** 覆盖身体贴图（只有「玩家骨架 NPC」用得上，见 `monsterModels.PlayerSkin.skinTex`） */
+  skinTex?: { dir: string; file: string };
 }
 
 /** 会带强化光效的槽位（戒指/项链/守护不画外观，也就不参与） */
@@ -501,13 +506,21 @@ async function buildSkinnedPart(
   actor: Actor,
   model: LoadedModel,
   out: THREE.SkinnedMesh[],
-  itemLevel = 0
+  itemLevel = 0,
+  skinTex?: { dir: string; file: string }
 ) {
   const { bmd, dir, file } = model;
   const remap = createBoneRemap(bmd, actor.rig);
 
   for (const mesh of bmd.meshes) {
-    const tex = await loadTexture(dir, mesh.texturePath);
+    /*
+     * `skinTex` = 换皮。原版黄金守卫（Class 236）就是「player.bmd 裸模
+     * + `Npc/guard_gold2.OZJ`」—— 那身金甲不是装备模型，是一张贴图。
+     * 换皮失败就退回原贴图，不至于整件装备消失。
+     */
+    const tex =
+      (skinTex ? await loadTexture(skinTex.dir, skinTex.file) : null) ??
+      (await loadTexture(dir, mesh.texturePath));
     if (!tex) continue;
     const mb = modelBlend(tex.texture, tex.tag === 'blend', mesh.texturePath);
     const skinned = createSkinnedMesh(
@@ -1055,7 +1068,7 @@ export async function applyEquipment(
     const byItem = type !== undefined ? await loadItemBmd(type, body) : null;
     const model = byItem ?? (await loadClassBody(playerDir, part.prefix, cls));
     // 职业默认身体没有强化等级（它不是「物品」），只有真装备才吃 +N
-    if (model) await buildSkinnedPart(actor, model, skinned, byItem ? lv : 0);
+    if (model) await buildSkinnedPart(actor, model, skinned, byItem ? lv : 0, equip.skinTex);
   }
 
   let wingInfo: EquipmentResult['wing'] = null;
@@ -1181,6 +1194,71 @@ export async function createPlayer(
  * 而是按客户端 `CreateMonster` 的 switch 查表：见 `monsterModels.ts`。
  * NPC（Class ≥ 230）从 `Data/Npc/` 取模型。
  */
+/**
+ * 用玩家骨架画的 NPC（236 黄金弓箭手 / 247 Archer Guard / 249 Berdysh Guard）。
+ *
+ * 原版 `CreateChar5(Key, 390, …)`：390 = 0x186 = **player.bmd 的模型槽**
+ * （`Model_Items.cpp` 的 `AccessModel(0x186, "Data\\Player\\", "Player", -1)`），
+ * 然后直接往 `c+504..c+648` 那 7 个装备槽里写模型号。也就是说它们
+ * **就是玩家**：同一副骨架、同一条装备管线，只是外观被写死。
+ *
+ * 所以这里不复刻那套 24 字节偏移（模型号还要再对一遍 `SLOT_FILES`），
+ * 而是把槽号翻译成 `EquipSet` 再走 `applyEquipment` ——
+ * 装备蒙皮、贴图混合、骨骼映射、强化光效全部复用现成逻辑。
+ */
+async function createPlayerSkinNpc(
+  scene: THREE.Scene,
+  cls: number,
+  model: ModelRef
+): Promise<{ actor: Actor; model: ModelRef } | null> {
+  const skin = model.player;
+  if (!skin) return null;
+  try {
+    const bmd = await loadBmd(`${PLAYER_DIR}player.bmd`);
+    const rig = createRig(bmd, MODEL_SCALE);
+    const actor = new Actor('player.bmd', rig);
+    actor.kind = 'npc';
+    actor.cls = cls;
+    actor.name = model.name;
+
+    /*
+     * player.bmd **只有骨架、0 个网格**，所以这一步只把 root 放进场景。
+     * 必须先放 —— `applyEquipment` 末尾的 `setMeshes` 靠 `root.parent`
+     * 决定新网格挂到哪，root 不在场景里网格就成了孤儿。
+     */
+    actor.attachMeshes(scene);
+
+    await applyEquipment(actor, PLAYER_DIR, {
+      ...skin.equip,
+      skinTex: skin.skinTex,
+    });
+
+    /*
+     * 染色：材质的 `color` 与 `map` 相乘，所以灰蓝贴图 × 暖金 = 暗金铜色。
+     * 这是「资源包里没有专用金甲模型」时的近似方案，见 `PlayerSkin.tint`。
+     *
+     * **必须 clone** —— `getBmdMaterial` 是**按贴图缓存共享**的，直接改
+     * `color` 会把所有用同一张贴图的角色一起染金（我第一版就把 249
+     * Berdysh Guard 染成了金色）。克隆出来的材质标 `owned`，销毁时一起释放。
+     */
+    if (skin.tint !== undefined) {
+      for (const m of actor.meshes) {
+        const mat = m.material as THREE.MeshPhongMaterial;
+        if (!mat?.color) continue;
+        const owned = mat.clone();
+        owned.color.setHex(skin.tint);
+        owned.userData.owned = true;
+        m.material = owned;
+      }
+    }
+    actor.play(0, true);
+    return { actor, model };
+  } catch (err) {
+    console.warn(`[creature] Class=${cls} 玩家骨架 NPC 加载失败（player.bmd）`, err);
+    return null;
+  }
+}
+
 export async function createCreatureByClass(
   scene: THREE.Scene,
   dirs: { monster: string; npc: string },
@@ -1188,6 +1266,9 @@ export async function createCreatureByClass(
 ): Promise<{ actor: Actor; model: ReturnType<typeof modelForClass> } | null> {
   const model = modelForClass(cls);
   if (!model) return null;
+
+  // 236 / 247 / 249 走玩家骨架那条路
+  if (model.player) return createPlayerSkinNpc(scene, cls, model);
 
   const baseDir = model.dir === 'npc' ? dirs.npc : dirs.monster;
 

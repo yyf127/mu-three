@@ -959,3 +959,106 @@ node tools/guild-war-probe.mjs   12/12
 这些 633/665/… 是**客户端模型号**（和 `BodyPart = Class + 0x390` 那套不是一张表），
 我们手里没有「模型号 → 物品类型」的映射表，硬猜会变成一身错装备的守卫 ——
 比现在拿 `Man01` 顶替更糟。所以这一项先留着，等能拿到那张表（或原版截图逐件对）再做。
+
+## 二十一、三个「玩家骨架 NPC」：黄金弓箭手 / Archer Guard / Berdysh Guard
+
+上一轮把这项标成「暂缓，缺模型号→物品类型映射表」。用户给了两张原版截图，
+顺着 `Monster.cpp:1245/1299/1318` 把表找到了 —— **不需要映射表，模型号减 400 就是物品类型**。
+
+### 原版怎么做的
+
+```c
+case 247:
+    c = CreateChar5(Key, 390, PositionX, PositionY);   // 390 = 0x186 = player.bmd 的模型槽
+    *(unsigned short*)(c + 504) = 633;   // Helm
+    *(unsigned short*)(c + 528) = 665;   // Armor
+    *(unsigned short*)(c + 552) = 697;   // Pant
+    *(unsigned short*)(c + 576) = 729;   // Glove
+    *(unsigned short*)(c + 600) = 761;   // Boot
+    *(unsigned short*)(c + 624) = 539;   // Weapon
+    *(unsigned short*)(c + 648) = 535;   // Shield
+```
+
+- `390 = 0x186` 正是 `Model_Items.cpp` 里 `AccessModel(0x186, "Data\\Player\\", "Player", -1)`
+  的槽号 —— 所以这三个 NPC **就是玩家**：同一副骨架、同一条装备管线；
+- 偏移每 24 字节一个槽，`504/528/552/576/600/624/648` 依次是
+  Helm / Armor / Pant / Glove / Boot / Weapon / Shield；
+- 模型槽号 ↔ 物品类型：`SLOT_FILES` 的表就是 `type + 400`，所以 **槽号 − 400 = 物品类型**。
+
+### 换算结果
+
+| 槽号 | 文件 | 物品类型 | 名字 |
+| --- | --- | --- | --- |
+| 633 | HelmMale10 | 233 | Plate Helm |
+| 665 | ArmorMale10 | 265 | Plate Armor |
+| 697 | PantMale10 | 297 | Plate Pants |
+| 729 | GloveMale10 | 329 | Plate Gloves |
+| 761 | BootMale10 | 361 | Plate Boots |
+| 539 | CrossBow04 | 139 | 弩 |
+| 535 | Arrows01 | 135 | 箭（247 左手那袋） |
+| 503 | Spear09 | 103 | 长矛（249 的 Berdysh） |
+
+`247 = Archer Guard`（弩 + 箭）、`249 = Berdysh Guard`（长矛），和用户给的两张图完全对得上 ——
+图 2 那身银蓝板甲 + 长柄武器就是 249。
+
+### 实现
+
+不再复刻那套 24 字节偏移，而是翻译成 `EquipSet` 走 `applyEquipment`：
+
+```ts
+export const PLAYER_SKIN_NPCS: Record<number, PlayerSkin> = {
+  236: { equip: {...Plate 五件, weapon: 139}, tint: 0xf0b24a },
+  247: { equip: {...Plate 五件, weapon: 139, shield: 135} },
+  249: { equip: {...Plate 五件, weapon: 103} },
+};
+```
+
+`createPlayerSkinNpc()`（`actor.ts`）：
+
+1. `loadBmd('/Data/Player/player.bmd')` → `createRig()` 建骨架；
+2. `actor.attachMeshes(scene)` —— player.bmd **只有骨架、0 个网格**，这一步只是把
+   `root` 放进场景（`applyEquipment` 末尾的 `setMeshes` 靠 `root.parent` 决定挂哪）；
+3. `applyEquipment(actor, PLAYER_DIR, ...)` 套装备 —— 蒙皮、贴图混合、骨骼映射、
+   强化光效全部复用现成逻辑。
+
+### 236 金色：资源包里没有那套甲
+
+`case 236` 只有 `*(unsigned int*)(c + 4) = 207`（换皮）和 `c+446 = 8`（动作组），
+所以外观本该靠贴图。实测三张候选：
+
+| 贴图 | 平均色 | 金色像素占比 |
+| --- | --- | --- |
+| `Npc/guard_gold2.OZJ` | rgb(56,53,50) | **5.3%** |
+| `Object5/guard_gold2.OZJ` | rgb(74,71,67) | 8.3% |
+| `Player/skin_archer_01.OZJ` | rgb(140,123,101) | **48.1%** |
+
+名字带 gold 的 `guard_gold2` 其实是守卫的腰布（两块同名文件内容还不一样，
+`md5` 不同）；`skin_archer_01` 倒是真偏金，但它**没有被任何 bmd 引用**
+（`grep -rl skin_archer` 只命中我们自己的 `textures-index.json`），
+套到 Plate 的 UV 上直接花成迷彩。
+
+结论：**这份资源包里没有黄金弓箭手的专用金甲**。所以 236 用「Plate 五件
++ 材质乘法染色 `0xf0b24a`」近似 —— 是配色接近，不是逐像素还原。
+
+> 踩坑：`getBmdMaterial` 是**按贴图缓存共享**的，直接 `material.color.setHex()`
+> 会把所有用同一张贴图的角色一起染金 —— 第一版就把 249 Berdysh Guard 染成了
+> 金色。现在染色前 `mat.clone()` 并标 `userData.owned`，`disposeActor` 里单独释放。
+
+### 验证
+
+```
+node tools/npc-skin-probe.mjs   21/21
+  A 分支：三个都走 player.bmd / 装备槽对（236 弩、247 弩+箭、249 矛）
+  B 网格：每个 9 个（Plate 五件共 8 个网格 + 武器 1 个），手持 1~2 个
+  C 截图：shots/npc-skin-{golden-archer,archer-guard,berdysh-guard}.png
+  D 可见性：与"挪走"对比，变化 1.2~2.4% 画面像素
+```
+
+新增调试口 `__MU_APP__.npcSkin(cls, dx, dy, hideSelf)`：在主角位置摆一个该 Class 的
+NPC（默认把主角藏起来，否则第三人称镜头会挡住），返回网格/手持/材质明细。
+
+### 仍未做
+
+- 远程玩家（服务端下发的 236/247/249）也会走这条路径 —— 因为改的是
+  `modelForClass()`，`remotes` 建实体时同样命中；
+- 236 的金色是染色近似，要真还原得补资源（原版 `GoldenArcher` 的 bmd + 贴图）。

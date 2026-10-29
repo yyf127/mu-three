@@ -21,6 +21,7 @@ import {
   MODEL_YAW_OFFSET,
   createPlayer,
   createCreatureByClass,
+  disposeActor,
   applyEquipment,
   setBackPose,
   BACK_FLIP,
@@ -269,7 +270,7 @@ import {
 } from './audio/sound';
 import { BGM_LOGIN, SKILL_SOUND } from './data/sounds';
 import { WeaponSlamLayer, WeaponWheelLayer } from './world/wheels';
-import { MONSTER_ACTION } from './world/monsterModels';
+import { MONSTER_ACTION, PLAYER_SKIN_NPCS } from './world/monsterModels';
 import { SKILL_FX, loadSkills, type SkillEntry } from './data/skills';
 import { BOW_SKILLS, castOf, sourceTag as fxTag, type CastSpec, type FxPart } from './data/skillFx';
 import { attachIconRenderer, itemIcon, iconDebug, clearItemIcons } from './ui/itemIcon';
@@ -11983,6 +11984,77 @@ function boot() {
         y: +n.y.toFixed(1),
         dist: player ? +Math.hypot(n.x - player.x, n.y - player.y).toFixed(2) : -1,
       })),
+    /**
+     * 调试：在玩家旁边摆一个「玩家骨架 NPC」（236 黄金弓箭手 / 247 Archer Guard /
+     * 249 Berdysh Guard），用来核对它们的外观是否和原版一致。
+     *
+     * 会登记进 `demoNpcs`，所以主循环会照常更新位置/动画；重复调同一个 Class
+     * 会先把旧的清掉，免得越摆越多。
+     */
+    npcSkin: async (cls = 236, dx = 0.35, dy = 0, hideSelf = true) => {
+      if (!world || !player) return null;
+      /*
+       * 默认把主角藏起来：NPC 摆在主角位置上，镜头是第三人称跟随，
+       * 摆到旁边会被玩家自己挡住、或者落到镜头外（我第一次就是这么截到空地的）。
+       */
+      for (const m of player.meshes) m.visible = !hideSelf;
+      for (const g of player.props) g.visible = !hideSelf;
+      /*
+       * 清掉**所有**玩家骨架 NPC（不只是同类）：它们都摆在玩家脚下同一个点，
+       * 留两个就会叠成一坨 —— 我第一次截图看到的"两个人"其实是三个叠着。
+       */
+      for (const [id, n] of [...demoNpcs]) {
+        if (!PLAYER_SKIN_NPCS[n.cls] && n.cls !== cls) continue;
+        // 主循环是遍历 `monsters` 调 update 的，光从 demoNpcs 删掉会留下孤儿
+        const mi = monsters.indexOf(n.actor);
+        if (mi >= 0) monsters.splice(mi, 1);
+        disposeActor(scene, n.actor);
+        demoNpcs.delete(id);
+      }
+      const created = await createCreatureByClass(scene, { monster: MONSTER_DIR, npc: NPC_DIR }, cls);
+      if (!created) return { cls, error: 'load-failed' };
+      const a = created.actor;
+      a.x = player.x + dx;
+      a.y = player.y + dy;
+      a.z = world.terrain.getHeight(a.x, a.y);
+      // 面朝玩家（模型朝向偏 180°，`MODEL_YAW_OFFSET` 已经在 Actor 里处理）
+      a.yaw = Math.atan2(player.y - a.y, player.x - a.x) + Math.PI;
+      demoNpcs.set(demoNextNpcId, {
+        id: demoNextNpcId++,
+        actor: a,
+        cls,
+        name: a.name,
+        x: a.x,
+        y: a.y,
+      });
+      // 和 `spawnDemoNpcs` 一样进 `monsters`：主循环靠它每帧 `actor.update(dt)`，
+      // 否则骨架根停在原点，画面上什么都看不到。
+      monsters.push(a);
+      addMonsterShadow(a);
+      return {
+        cls,
+        name: a.name,
+        meshes: a.meshes.length,
+        held: a.props.length,
+        parts: a.meshes.map(m => m.name),
+        // 材质诊断：贴图是否真的换成了 skinTex（宽度/是否 transparent 能看出来）
+        textures: a.meshes.map(m => {
+          const mat = m.material as THREE.MeshPhongMaterial;
+          const img = mat?.map?.image as { width?: number; height?: number } | undefined;
+          return {
+            mesh: m.name.split(':').pop(),
+            w: img?.width ?? 0,
+            h: img?.height ?? 0,
+            map: !!mat?.map,
+            transparent: mat?.transparent ?? false,
+            color: mat?.color?.getHexString?.() ?? '',
+          };
+        }),
+        player: !!created.model?.player,
+        equip: created.model?.player?.equip ?? null,
+        skinTex: created.model?.player?.skinTex ?? null,
+      };
+    },
     /** 离线演示：当前打开的货架（含演示价） */
     demoShop: () =>
       localShopItems.map(i => ({

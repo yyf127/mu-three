@@ -27,7 +27,8 @@ import { radialGlow } from './objectFx';
 import { additiveProps, fxAlpha } from '../core/additive';
 
 const ITEM_DIR = '/Data/Item/';
-const PLAYER_DIR = '/Data/Player/';
+/** `Data/Player/` —— 主角骨架与所有防具/守护模型都在这（`createPlayerSkinNpc` 也要用） */
+export const PLAYER_DIR = '/Data/Player/';
 
 interface ModelGroup {
   dir: string;
