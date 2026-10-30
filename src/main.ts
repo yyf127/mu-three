@@ -86,6 +86,7 @@ import {
   parseEventTime,
   parseNewCharacterInfo,
   parseCharacterCalc,
+  parseCharacterMaxLevel,
   parseHealthBar,
   parseOptionData,
   parseMonsterDamage,
@@ -4004,6 +4005,18 @@ async function connectAndLogin(account: string, password: string) {
       } else if (head === 0x60 && pkt[0] === 0xc1) {
         const r = parseGuildWarResult(pkt);
         if (r) chatBox.push('系统', guildWarText(r.result), 1);
+      } else if (head === 0xdf && pkt[0] === 0xc1) {
+        /*
+         * `PMSG_CHARACTER_MAX_LEVEL_SEND`：服务端配置的等级上限
+         * （`DSProtocol.cpp:488` 登录时推，来自 `m_MaxCharacterLevel`）。
+         *
+         * 以前角色面板写死 400；换个配置（比如 350/450）显示就不对了。
+         */
+        const maxLevel = parseCharacterMaxLevel(pkt);
+        if (maxLevel) {
+          maxCharacterLevel = maxLevel;
+          characterPanel.setMaxLevel(maxLevel);
+        }
       } else if (head === 0x61 && pkt[0] === 0xc1) {
         const w = parseGuildWarDeclare(pkt);
         if (w) chatBox.push('战盟', `【战盟战】${w.name} ${w.type ? '接受了战盟战' : '宣战'}`, 1);
@@ -6618,6 +6631,9 @@ async function serverTeleport(map: number, x: number, y: number, dir: number) {
     teleporting = false;
   }
 }
+
+/** 等级上限（`0xDF`，默认 400）。角色面板「等级: 当前 / 上限」用它 */
+let maxCharacterLevel = 400;
 
 /** 换图进行中（防止 0x1C 重入） */
 let teleporting = false;
@@ -12689,6 +12705,14 @@ function boot() {
         player: { alpha: +player.fadeAlpha.toFixed(2), opacities: read(player) },
         other: other ? { name: other.name, opacities: read(other) } : null,
       };
+    },
+    /** 调试：服务端下发的等级上限（`0xDF`）+ 面板当前用的值 */
+    charMaxLevel: () => ({ server: maxCharacterLevel, panel: characterPanel.maxLevelOf() }),
+    /** 调试：直接设等级上限（离线没有 socket，收包路径没法走） */
+    setCharMaxLevel: (n: number) => {
+      maxCharacterLevel = n;
+      characterPanel.setMaxLevel(n);
+      return characterPanel.maxLevelOf();
     },
     /** 调试：最近一次技能为什么没放出来（`''` = 正常，`'mana'` / `'mana-scroll'`） */
     skillBlock: () => lastSkillBlock,

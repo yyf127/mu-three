@@ -2276,6 +2276,31 @@ export interface CharacterCalc {
   defenseSuccessRate: number;
 }
 
+/**
+ * 下行 `0xC1/0xDF` —— `PMSG_CHARACTER_MAX_LEVEL_SEND`（`Protocol.h:343`）。
+ *
+ * ```
+ * C1 08 DF [PAD] DWORD MaxCharacterLevel
+ * ```
+ *
+ * `PBMSG_HEAD` 是 3 字节，`DWORD` 要 4 字节对齐 → **中间有 1 字节填充**，
+ * 所以真正的值在 offset 4 而不是 3（原版 `Net_Process.cpp:7335` 的注释
+ * 用 debug.log 确认过线上长度是 8）。
+ *
+ * 服务端在 `DSProtocol.cpp:488` 登录时推这个值，来自
+ * `m_MaxCharacterLevel`（本服 400），角色面板的「等级: 当前 / 上限」用它。
+ */
+export function parseCharacterMaxLevel(pkt: Uint8Array): number | null {
+  if (pkt[0] !== 0xc1 && pkt[0] !== 0xc3) return null;
+  const base = pkt[0] === 0xc3 ? 3 : 2;
+  if (pkt[base] !== 0xdf) return null;
+  if (pkt.length < base + 6) return null;
+  const off = base + 2; // 跳过 1 字节对齐填充
+  return (
+    (pkt[off] | (pkt[off + 1] << 8) | (pkt[off + 2] << 16) | (pkt[off + 3] << 24)) >>> 0
+  );
+}
+
 export function parseCharacterCalc(pkt: Uint8Array): CharacterCalc | null {
   if (pkt[0] !== 0xc1 && pkt[0] !== 0xc3 && pkt[0] !== 0xc4 && pkt[0] !== 0xc2) return null;
   const base = pkt[0] === 0xc2 || pkt[0] === 0xc4 ? 3 : 2;

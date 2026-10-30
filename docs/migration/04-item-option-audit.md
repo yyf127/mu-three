@@ -1209,3 +1209,62 @@ node tools/skill-fx-probe.mjs   44/44（新增 G 段 6 条）
 
 新增调试口 `fadeProbe()`：返回主角当前 alpha / 各网格材质透明度，外加一个**别的实体**
 的透明度 —— 后者一直是 1 才说明没动共享材质。
+
+## 二十四、主命令头全量对账：协议层清零
+
+之前只对过 `0xF3` 子码。这一轮把**二级主命令头**也做了一遍对账：
+
+- 服务端：`grep 'header.set(0xNN,'` 得到 **87 个**（`Protocol.cpp` + 各 .cpp）；
+- 客户端：扫 `src/` 全目录的 `head === 0xNN` / `case 0xNN:`，得到 **106 个**
+  （多出来的是包头 `C1/C2/C3/C4`、`F3` 子码、以及客户端自造的码）。
+
+差集 8 个，逐个查服务端发送函数：
+
+| 码 | 发送函数 | 实际用途 | 结论 |
+| --- | --- | --- | --- |
+| `0x0B` | `GCEventStateSend` | 只在**角色下线**（`DelCharacterInfo`）和飞龙事件发 | 低价值，不做 |
+| `0x0C` | `GCServerMsgSend` | 「服务器将关闭」这类公告 | 低价值，不做 |
+| `0x0E` | `GCLiveClientSend` | 心跳 **echo** —— 客户端发、服务端回 | **已经做了**（`session.ts:140`） |
+| `0x18` | `GCActionSend` | 别人/怪物的动作广播 | **已经做了**（`remotes.parseAction`） |
+| `0xDD` | `GCCharacterDeleteLevelSend` | 删角色所需等级 | 原版只存不用（`g_CharDeleteMaxLevel` 无消费方） |
+| `0xDE` | `GCCharacterCreationEnableSend` | 建角开关 | 原版只存不用（`g_CharCreationEnable` 无消费方） |
+| `0xDF` | `GCCharacterMaxLevelSend` | 等级上限 | **有用**，这一轮补上 |
+| `0xF1` | `GCConnectAccountSend` | 登录结果 | **已经做了**（`session.ts:229`） |
+
+`0x0E` / `0x18` / `0xF1` 之所以出现在差集里，是我第一版的 grep 只扫了
+`main.ts` + `remotes.ts`、且只认 `head === 0xNN` 字面量 —— `parseAction` 里
+是按 `pkt[2]` 判断的、`session.ts` 是 `head === 0xf1 && sub === ...`。
+
+### `0xDF` 的字节对齐（唯一真补的）
+
+```
+C1 08 DF [PAD] DWORD MaxCharacterLevel
+         ↑ 3 字节 PBMSG_HEAD 之后有 1 字节填充，值在 offset 4
+```
+
+按 offset 3 硬读会把 `0x0190`(**400**) 读成 `0x019000`(**102400**)。
+原版 `Net_Process.cpp:7335` 就是靠 debug.log 记下的「op_de=DF size=8」确认这点。
+
+`net/game.ts::parseCharacterMaxLevel()` + `characterPanel.setMaxLevel()`：
+角色面板的「等级: 当前 / 上限」（`GlobalText[200]`）不再写死 400，
+换一份 `m_MaxCharacterLevel` 不同的配置也能显示对。
+
+### 两处注释纠正（原版也没有）
+
+- `cursor.ts`：`Cursoreye.ozt` 是**后续版本**的光标，0.97 的 `Cursor_Render`
+  没有对应分支 —— 不是「我们没做」，是原版没有；
+- `remotes.ts` 的 `0x5B`：原版 `Net_Process.cpp:6763` 解析进 `EntityGuildList`
+  就结束，全工程无渲染分支。**同盟/敌对不改变名字颜色**，之前写「同盟高亮还没做」
+  是错的。
+
+### 验证
+
+```
+node tools/proto-probe.mjs   8/8
+  A 0xDF：400 / 350 / 非 DF / 短包 / 「不跳过填充会读成 102400」（对照）
+  B 面板：默认 400 → 设 350 → 改回 400
+
+npm run build ✓   skill-fx 44/44   npc-skin 21/21   gate 21/21
+```
+
+新增调试口 `charMaxLevel()` / `setCharMaxLevel(n)`。

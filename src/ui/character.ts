@@ -124,7 +124,8 @@ const TEXT_ROWS: TextRowDef[] = [
  * 等级上限。原版读全局 `g_MaxCharacterLevel`（`globals.cpp:1321`，默认 400），
  * 由 opcode 0xDF 下发；这个服务端没发，所以取默认值。
  */
-const MAX_LEVEL = 400;
+/** 默认等级上限。服务端 `0xDF` 会覆盖它（`m_MaxCharacterLevel`，本服 400） */
+const DEFAULT_MAX_LEVEL = 400;
 
 export class CharacterPanel {
   private el: HTMLDivElement;
@@ -138,6 +139,8 @@ export class CharacterPanel {
   /** 当前渲染用的数据；`setInfo` 之前是 null，面板显示占位 */
   private info: CharacterInfo | null = null;
   private charName = '';
+  /** 等级上限：`0xDF` 下发（`GlobalText[200]` 的第二个 `%d`） */
+  private maxLevel = DEFAULT_MAX_LEVEL;
   /** 转生次数（`0xF3/0xE0` 的 `ViewReset`） */
   private reset = 0;
   /**
@@ -313,6 +316,19 @@ export class CharacterPanel {
     return this.text ? this.text.className(classId) : '';
   }
 
+  /** 当前用的等级上限（探针读它，确认 `0xDF` 真的落到了面板上） */
+  maxLevelOf() {
+    return this.maxLevel;
+  }
+
+  /** `0xC1/0xDF`：服务端配置的等级上限（默认 400） */
+  setMaxLevel(n: number) {
+    if (!Number.isFinite(n) || n <= 0) return;
+    if (this.maxLevel === n) return;
+    this.maxLevel = n;
+    this.paint();
+  }
+
   setInfo(
     name: string,
     level: number,
@@ -420,7 +436,7 @@ export class CharacterPanel {
      * 防御率，但这份 Text.bmd 的 [64] 是 "Attack speed: %d"（西语版行号偏了），
      * [67] 才是 "Defense rate: %d"，所以这里按语义取 67。
      */
-    this.setText('level', t.fmt(200, this.charLevel, MAX_LEVEL));
+    this.setText('level', t.fmt(200, this.charLevel, this.maxLevel));
     this.setText('exp', t.fmt(201, info.experience, info.nextExperience));
     this.setText('strength', t.fmt(202, str));
     // 有点数才带 (额外点数)，和原版 CA+58 的分支一致

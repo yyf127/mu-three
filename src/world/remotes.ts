@@ -936,9 +936,13 @@ export class RemoteManager {
   /**
    * `0x5A` / `0x5B`：视野里的战盟信息。
    *
-   * 0x5A 直接带盟名 + 32 字节标志，0x5B 只有 `userIndex → guildIndex` 的映射
-   * （原版靠它把同盟的人串起来，名字/标志仍要从 0x5C 成员表查）。
-   * 这里 0x5A 直接落到实体上；0x5B 只记账（同盟高亮还没做）。
+   * 0x5A 直接带盟名 + 32 字节标志，0x5B 只有 `userIndex → guildIndex` 的映射。
+   * 这里 0x5A 直接落到实体上；0x5B 只记账。
+   *
+   * **0x5B 不做视觉是有依据的**：原版 `Net_Process.cpp:6763` 把它解析进
+   * `EntityGuildList` 就结束了，全工程没有一处渲染分支 —— 同盟/敌对
+   * 不改变名字颜色，也不加标志边框。之前这条注释写「同盟高亮还没做」，
+   * 其实原版就没做。
    */
   private handleViewportGuild(pkt: Uint8Array) {
     const info = parseViewportGuildInfo(pkt);
