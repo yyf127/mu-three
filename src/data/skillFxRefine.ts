@@ -299,14 +299,15 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
     add: [
       {
         kind: 'beam',
-        file: 'Effect/JointEnergy01.OZJ',
+        file: 'Effect/JointThunder01.OZJ',
         anchor: 'self',
         count: 1,
         size: 0.5,
         // 源码 1168 是 30 帧（1.2 s）；太短会看不见，取一半
         life: 0.55,
         aim: true,
-        note: '源码 1168（Effect_Create case 0x490）= 从施法者连到目标的一道线，30 帧',
+        segments: 8,
+        note: '源码 1168（Effect_Create case 0x490）→ MoveEffect 30 帧 → Joint_Create(0x4EE)：8 段链，每段 1254 JointThunder ×2 + 1195 粒子',
       },
       {
         kind: 'flash',

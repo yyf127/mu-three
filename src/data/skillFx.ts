@@ -117,6 +117,11 @@ export interface FxPart {
    */
   aim?: boolean;
   /**
+   * 光束拆成几段折线播放（源码 `Joint_Create(0x4EE)` 的 8 段链）。
+   * 不给 = 拉一根直光；给 N = 拉 N 段首尾相连、节点轻微抖动的闪电链。
+   */
+  segments?: number;
+  /**
    * 延迟多少秒再生成（`weaponSlam` 的落地件用）。
    * 源码 244 的落地在 life==3（总 20 帧）→ 0.68 s。
    */
@@ -1132,13 +1137,14 @@ export function castOf(skill: SkillEntry): CastSpec {
       parts = [
         {
           kind: 'beam',
-          file: 'Effect/JointLaser02.OZJ',
+          // 源码 CreateJoint(1258) → generated 表 1258 = JointLaser01（正版映射）
+          file: 'Effect/JointLaser01.OZJ',
           anchor: 'target',
           count: 2,
           size: 0.42,
           life: 0.4,
           aim: true,
-          note: '52 穿透箭：CreateJoint(1258)×2 @目标（JointLaser02 贯穿光）',
+          note: '52 穿透箭：CreateJoint(1258)×2 @目标（JointLaser01 贯穿光）',
         },
       ];
     }

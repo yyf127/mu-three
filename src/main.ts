@@ -7230,6 +7230,7 @@ function playCastParts(opts: {
               file: part.file,
               width: part.size ?? 0.4,
               life: part.life ?? 0.3,
+              segments: part.segments,
             })
             .catch(err => console.warn(`[skill] ${label} 命中光束生成失败`, err));
           continue;

@@ -29,6 +29,12 @@ export interface BeamOptions {
   width: number;
   /** 存活秒数 */
   life: number;
+  /**
+   * 沿 A→B 拆成几段折线（源码 `Joint_Create(0x4EE)` 的 8 段链）。
+   * 不给 = 1，保持原来的单一直光束；>1 时中间节点在垂直平面随机抖动，
+   * 视觉上就是原版那种「一段一段的闪电链」而不是一根直棍。
+   */
+  segments?: number;
   /** 初始不透明度，默认 0.9 */
   opacity?: number;
 }
@@ -37,6 +43,8 @@ export interface BeamFx {
   id: number;
   file: string;
   mesh: THREE.Mesh;
+  /** 分段链的附属段 mesh（空数组 = 原来的单一直光束） */
+  extra: THREE.Mesh[];
   material: THREE.MeshBasicMaterial;
   age: number;
   life: number;
@@ -111,6 +119,46 @@ function crossGeometry(): THREE.BufferGeometry {
 
 const Y_AXIS = new THREE.Vector3(0, 1, 0);
 
+/**
+ * 计算一条折线光束的中间节点（只返回第 1 .. n-1 个节点，不含首尾）。
+ *
+ * 源码 0x4EE 的 8 段链每段位置是「上一段末尾 + 旋转后的朝下向量」，天然形成
+ * 一条带垂直落差的折线。我们这里按距离均分后再把中间节点在**垂直平面**
+ * （沿 A→B 方向的横向 + 上下）随机抖动，形成「一段段」的闪电链观感。
+ */
+function chainPoints(
+  a: THREE.Vector3,
+  b: THREE.Vector3,
+  n: number,
+  rng: () => number = Math.random
+): THREE.Vector3[] {
+  if (n <= 1) return [];
+  const dir = new THREE.Vector3().subVectors(b, a);
+  const len = dir.length();
+  if (len < 1e-4) return [];
+  const step = dir
+    .clone()
+    .normalize()
+    .multiplyScalar(len / n);
+  // 垂直到光束方向的随机轴：取叉积生成一个正交平面
+  const up = new THREE.Vector3(0, 0, 1);
+  const side = new THREE.Vector3().crossVectors(dir.clone().normalize(), up);
+  if (side.lengthSq() < 1e-6) side.set(1, 0, 0).cross(up); // 光束本身竖直时
+  side.normalize();
+  const amp = len / n * 0.35; // 抖动幅度 = 段长的 35%（够明显又不断裂）
+  const pts: THREE.Vector3[] = [];
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    const base = a.clone().addScaledVector(dir, t);
+    // 中间节点的横向抖动 + 上下抖动 —— 但两端（i=0, n）保持原位置
+    const jitter = (Math.random() * 2 - 1) * amp;
+    base.addScaledVector(side, jitter);
+    base.z += (Math.random() * 2 - 1) * amp * 0.8;
+    pts.push(base);
+  }
+  return pts;
+}
+
 export class BeamLayer {
   readonly active: BeamFx[] = [];
   private scene: THREE.Scene;
@@ -144,18 +192,58 @@ export class BeamLayer {
       toneMapped: false,
       opacity: opt.opacity ?? 0.9,
     });
-    const mesh = new THREE.Mesh(crossGeometry(), mat);
-    mesh.name = `fx:beam:${opt.file}`;
-    mesh.position.copy(a).addScaledVector(dir, 0.5);
-    mesh.quaternion.setFromUnitVectors(Y_AXIS, dir.clone().normalize());
-    mesh.scale.set(opt.width, len, opt.width);
-    mesh.renderOrder = 12;
-    this.scene.add(mesh);
+
+    /*
+     * 分段链：源码 0x4EE 是 8 段折线（`segments` 个 mesh 首尾相连）。
+     * 每段都用自己的方向旋转，整体仍然是一条连续的光链。
+     * 只有 `segments > 1` 才走折线；默认仍是原来的单一直光束。
+     */
+    const seg = Math.max(1, Math.floor(opt.segments ?? 1));
+    const extra: THREE.Mesh[] = [];
+    let mesh: THREE.Mesh;
+
+    // 单段直光：从 a 到 b 铺一片宽面片
+    const placeStraight = (from: THREE.Vector3, to: THREE.Vector3, name: string): THREE.Mesh => {
+      const d = to.clone().sub(from);
+      const l = d.length();
+      const m = new THREE.Mesh(crossGeometry(), mat);
+      m.name = name;
+      m.position.copy(from).addScaledVector(d, 0.5);
+      m.quaternion.setFromUnitVectors(Y_AXIS, d.clone().normalize());
+      m.scale.set(opt.width, Math.max(l, 0.05), opt.width);
+      m.renderOrder = 12;
+      this.scene.add(m);
+      return m;
+    };
+
+    if (seg > 1) {
+      const pts = chainPoints(a, b, seg);
+      let prev = a;
+      const segMeshes: THREE.Mesh[] = [];
+      for (const p of pts) {
+        const l = p.distanceTo(prev);
+        if (l < 0.05) continue;
+        segMeshes.push(placeStraight(prev, p, `fx:beam:${opt.file}:seg`));
+        prev = p;
+      }
+      const lastL = b.distanceTo(prev);
+      if (lastL >= 0.05) segMeshes.push(placeStraight(prev, b, `fx:beam:${opt.file}:seg`));
+      if (segMeshes.length === 0) {
+        // 极端退化：距离太短导致每段都 < 1mm，整体直光兜底
+        segMeshes.push(placeStraight(a, b, `fx:beam:${opt.file}`));
+      }
+      mesh = segMeshes[0];
+      extra.push(...segMeshes.slice(1));
+    } else {
+      mesh = placeStraight(a, b, `fx:beam:${opt.file}`);
+    }
 
     const fx: BeamFx = {
       id: nextId++,
       file: opt.file,
       mesh,
+      // 分段链的附属 mesh 也要随主 mesh 一起淡出/移除
+      extra,
       material: mat,
       age: 0,
       life: Math.max(0.08, opt.life),
@@ -186,6 +274,7 @@ export class BeamLayer {
     const f = this.active[index];
     f.done = true;
     this.scene.remove(f.mesh);
+    for (const m of f.extra) this.scene.remove(m);
     f.material.dispose();
     this.active.splice(index, 1);
   }
@@ -209,6 +298,8 @@ export class BeamLayer {
       file: f.file,
       age: Number(f.age.toFixed(3)),
       life: f.life,
+      // 分段链 = 1（主干）+ 附属段数；直光 = 1
+      segments: 1 + f.extra.length,
       from: [f.from.x, f.from.y, f.from.z].map(n => Number(n.toFixed(2))),
       to: [f.to.x, f.to.y, f.to.z].map(n => Number(n.toFixed(2))),
       len: Number(f.from.distanceTo(f.to).toFixed(2)),
