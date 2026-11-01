@@ -1268,3 +1268,65 @@ npm run build ✓   skill-fx 44/44   npc-skin 21/21   gate 21/21
 ```
 
 新增调试口 `charMaxLevel()` / `setCharMaxLevel(n)`。
+
+## 二十五、释放技能的动画与特效细节对齐（技能包驱动）
+
+按 `mu097k-threejs-migration` 技能包回源码逐条核对 `Combat_AttackStage.cpp`，
+修了三处「动作/特效与源码不一致」：
+
+### 1. 施法动作：82/83 随机交替（之前本地固定 82）
+
+源码 `SetPlayerMagic`（`Scene_CharSelect_Nav.cpp`，IDA 0x00444A80）：
+
+```c
+SetAction(c, 0x52 + rand() % 2)   // 0x52=82, 0x53=83 交替
+```
+
+之前 `castSkill` 的 `actionOf()` 返回固定 `CAST_ACTION=82`，导致施法动作永远是
+同一只手型（远端 `playRemoteSkill` 的 legacy 分支倒是写对了 `Math.random()<0.5?82:83`，
+两边不一致）。现在 `actionOf` 里也随机，删除死常量 `CAST_ACTION`。
+本地/远端共用 `castOf()` → `spec.action`，手势统一。
+
+### 2. 43 袭风刺 / 47 钻云枪的 AttackStage 特效：按 stage 延时
+
+源码 `AttackStage`（`Combat_AttackStage.cpp`，IDA 0x00448930）：
+
+```
+43 袭风刺：stage 6..12 每帧 2 次 CreateEffect → 0.24s 起持续到 0.48s
+47 钻云枪：stage 4 → 0.16s；stage 8 → 0.32s
+```
+
+之前 `ATTACK_STAGE_EXTRAS` 一次性全出（6 道雷同时炸，观感像喷泉）。
+现在给 `FxPart.delay` 按 stage 帧号 @25fps 错开：43 = 0.24/0.32/0.4，
+47 = 0.16/0.32。
+
+### 3. 52 穿透箭：动作 5 倍速
+
+源码 `AttackStage` skill==52 分支：
+
+```c
+*(o+268)=4.0f; *(o+264)=5.0f;   // anim_speed 5 倍
+```
+
+之前穿透箭和多重箭一样是普通弓速。给 `SkillRefine` 加 `actionSpeed` 字段、
+`castOf()` 透传、本地/远端播放后 500ms 还原（否则角色一直 5 倍速待机）。
+CastSpec.actionSpeed 只作用于这一次动作。
+
+### 验证
+
+```
+node tools/skill-fx-probe.mjs  44/44
+  G 段（瞬移淡出）：before/during/恢复 全过 —— 恢复断言改成轮询（CDP 首帧
+  加载会让 600ms 兜底被拉长到 ~1s，别再写死 sleep-800ms）。
+node .tmp 诊断：施法动作 20 连放 = 82/83 交替、43 delay=[0.24,0.32,0.4,0.16]、
+  52 speed=5
+npm run build ✓  proto-probe 8/8  gate 21/21
+```
+
+### 仍未对上的（依 skill 包 pitfall #123）
+
+- `AttackStage` 还有 55 玄月斩的 `CreateEffect(1267/1168)` 和 52 的 `stage==3`
+  闪光+音效 100 —— 1267/1168 两个特效号**没登记**（`Effect_Create` case 0x4F3 是
+  1 帧闪光、0x490 是从骨骼连到目标的光鞭），当前用的是近似替身；
+- 施法动作 82/83 是**每次施法独立随机**，与源码一致，但连续施法不会有
+  「上一招 82、下一招一定 83」的强制交替（原版也没有）。

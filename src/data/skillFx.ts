@@ -131,6 +131,15 @@ export interface CastSpec {
   /** 动作说明（面板/探针显示） */
   actionNote: string;
   /**
+   * 动作播放速度倍率（源码 `AttackStage` 会改 `o+264` 的 anim_speed）。
+   *
+   *   52 穿透箭：`*(o+264) = 5.0f`、`*(o+268) = 4.0f` —— 动作加速到 5 倍
+   *   55 玄月斩：`anim_speed >= 3.0` 才触发伤害帧
+   *
+   * 不设置 = 1.0（正常速）。
+   */
+  actionSpeed?: number;
+  /**
    * 特效来源：
    *   client   = 源码里查到的；
    *   fallback = 源码没给，用 `SKILL_FX` 的表现兜底；
@@ -206,8 +215,10 @@ const SUBSTITUTE_NOTE: Record<number, string> = {
  * `Scene_CharSelect_Nav.cpp` 的 `SetPlayerMagic()`（IDA 0x00444A80）：
  * 玩家（entity type 390）走 `SetAttackSpeed()` 之后
  * `SetAction(c, 0x52 + rand() % 2)` —— 也就是 **82/83** 两个交替。
+ *
+ * 注意：这个随机在 `actionOf` 里做（`Math.random() < 0.5 ? 82 : 83`），
+ * 不再用固定 `CAST_ACTION` —— 本地与远端必须都是「二选一」。
  */
-const CAST_ACTION = 82;
 
 /**
  * 技能号 → 动作号。
@@ -401,6 +412,10 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
      *   CreateEffect(1257) ×2               —— Spark01 火花关节
      * 共 6 道从身上炸开的电弧（源码 attackTime 2..8 每帧 ±300 单位随机）。
      * 之前错配成 Pierpart×2 + 单种雷×3。
+     *
+     * 源码是 **stage 6..12 每帧 2 次**（25fps 下 = 0.24s 起持续到 0.48s），
+     * 不是一次全出。这里用 `delay` 把三组按 0.24 / 0.32 / 0.40 错开，
+     * 否则 6 道雷同时炸，观感像“一次性喷泉”。
      */
     {
       kind: 'beam',
@@ -410,6 +425,7 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
       size: 0.5, // scale 50
       spread: 2.6,
       life: 0.3,
+      delay: 0.24,
       note: 'AttackStage skill==43 → CreateEffect(1254) ×2 scale50（JointThunder）',
     },
     {
@@ -420,6 +436,7 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
       size: 0.2, // scale 10
       spread: 2.6,
       life: 0.3,
+      delay: 0.32,
       note: 'AttackStage skill==43 → CreateEffect(1254) ×2 scale10（JointThunder）',
     },
     {
@@ -430,6 +447,7 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
       size: 0.3,
       spread: 2.6,
       life: 0.3,
+      delay: 0.4,
       note: 'AttackStage skill==43 → CreateEffect(1257) ×2（Spark01 火花关节）',
     },
   ],
@@ -440,6 +458,7 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
       anchor: 'self',
       count: 1,
       scale: 1,
+      delay: 0.16, // stage 4 @25fps
       note: 'AttackStage skill==47 stage 4 → CreateEffect(497)',
     },
     {
@@ -448,6 +467,7 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
       anchor: 'self',
       count: 2,
       scale: 1,
+      delay: 0.32, // stage 8 @25fps
       note: 'AttackStage skill==47 stage 8 → CreateEffect(496) ×2',
     },
   ],
@@ -649,7 +669,15 @@ function actionOf(id: number, job: SkillJob): { action: number; note: string } {
     return { action: -1, note: `${id} 走 SetPlayerBow（弓/弩 46..49，随武器）` };
   }
   if (job === 'wizard' || job === 'elf' || MAGIC_SKILLS.has(id)) {
-    return { action: CAST_ACTION, note: `${id} 施法动作 ${CAST_ACTION}（SetPlayerMagic 0x52/0x53）` };
+    /*
+     * 源码 `SetAction(c, 0x52 + rand() % 2)` —— 施法动作是 **82/83 随机交替**，
+     * 不是固定 82。本地 `castSkill` 与远端 `playRemoteSkill` 必须一致，
+     * 否则同一招自己放和看别人放是两个手型。
+     *
+     * 注意：这个随机发生在**动作号**上，播放的 `player.play()` 不会重滚。
+     */
+    const action = Math.random() < 0.5 ? 82 : 83;
+    return { action, note: `${id} 施法动作 ${action}（SetPlayerMagic 0x52 + rand()%2）` };
   }
   if (NO_EXPLICIT_ACTION.has(id)) {
     return { action: -1, note: `${id} 在 0x19 里不设动作 → 随武器挥砍` };
@@ -1075,6 +1103,7 @@ export function castOf(skill: SkillEntry): CastSpec {
     source,
     parts,
     special: refine?.special,
+    actionSpeed: refine?.actionSpeed,
     note: refine?.special
       ? refine.note
       : wiz
@@ -1118,6 +1147,8 @@ export function castOf(skill: SkillEntry): CastSpec {
       actionNote: a.note,
       source: 'client',
       parts,
+      // 52 穿透箭的动作加速（`AttackStage` 的 `*(o+264)=5.0f`）走 refine 配
+      actionSpeed: refine?.actionSpeed,
       note:
         id === 52
           ? '52 穿透箭：CreateArrows（箭由 shootArrows 发）+ Joint 1258×2 贯穿光'

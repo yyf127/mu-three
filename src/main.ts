@@ -7611,6 +7611,19 @@ async function castSkill(skill: SkillEntry) {
   const act = spec.action >= 0 ? spec.action : attackAction(animInput(), attackCombo++);
   player.play(act, false);
   /*
+   * 动作加速（源码 52 穿透箭的 `*(o+264)=5.0f`）：
+   * 只对**这一次**动作生效，播完还原 —— 否则角色一直 5 倍速待机/走路。
+   * 时长按动作帧数估算（原版 25fps），5 倍速下最多 0.4 s。
+   */
+  const prevSpeed = player.actionSpeed;
+  if (spec.actionSpeed && spec.actionSpeed > 0) {
+    player.actionSpeed = spec.actionSpeed;
+    const p = player; // 捕获：setTimeout 回包里 player 可能已更新
+    window.setTimeout(() => {
+      if (p.actionSpeed === spec.actionSpeed) p.actionSpeed = prevSpeed;
+    }, 500);
+  }
+  /*
    * 瞬移（6/15）：源码 `CreateTeleportBegin` 在 `SetAction(o, 87)` 的同一函数里
    * 把 alpha 设 0，所以这里紧接着动作就淡出 —— 顺序照抄，别挪到前面。
    */
@@ -10158,6 +10171,19 @@ function playRemoteSkill(ev: SkillCastEvent, opts: { allowSelf?: boolean } = {})
         : attackAction(animInput(), attackCombo++)
       : (legacy?.action ?? (Math.random() < 0.5 ? 82 : 83));
   caster.actor.play(act, false);
+
+  /*
+   * 动作加速（源码 52 穿透箭 `*(o+264)=5.0f`）—— 与本地点播相同，
+   * 看别人射穿透箭也是“嗖”一下的 5 倍速，不是普通弓速。
+   * 只覆盖这一次动作，500ms 后还原（动作本身最长 0.4s）。
+   */
+  const prevSpeed = caster.actor.actionSpeed;
+  if (spec?.actionSpeed && spec.actionSpeed > 0) {
+    caster.actor.actionSpeed = spec.actionSpeed;
+    window.setTimeout(() => {
+      if (caster.actor.actionSpeed === spec.actionSpeed) caster.actor.actionSpeed = prevSpeed;
+    }, 500);
+  }
 
   /*
    * 精灵的弓箭三技能（24/51/52）在源码里走 `CreateArrows` —— 别人的多重箭

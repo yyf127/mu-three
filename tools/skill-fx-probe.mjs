@@ -166,9 +166,17 @@ try {
     JSON.stringify(during.other?.opacities)
   );
 
-  await sleep(800);
-  const after = JSON.parse(await c.ev(`JSON.stringify(__MU_APP__.fadeProbe())`));
-  check('0.6 s 后恢复不透明', after.player.alpha === 1, String(after.player.alpha));
+  /*
+   * 恢复的时序按**轮询**判：CDP 首次执行 castSkill 会先加载模块，
+   * 600ms 的兜底恢复可能被拉长到 1s 左右。这里最多等 2.5s，
+   * 和 [E] 段处理异步 spawn 是同一个思路。
+   */
+  let after = JSON.parse(await c.ev(`JSON.stringify(__MU_APP__.fadeProbe())`));
+  for (let i = 0; i < 25 && after.player.alpha !== 1; i++) {
+    await sleep(100);
+    after = JSON.parse(await c.ev(`JSON.stringify(__MU_APP__.fadeProbe())`));
+  }
+  check('淡出后恢复不透明', after.player.alpha === 1, String(after.player.alpha));
   check('材质也已还原', (after.player.opacities ?? []).every(v => v === 1), JSON.stringify(after.player.opacities));
 
   console.log(`\n结果 ${pass} 通过 / ${fail} 失败`);

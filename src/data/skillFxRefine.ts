@@ -53,6 +53,13 @@ export interface SkillRefine {
    * 才不会被面板打成"我们编的"。
    */
   source?: 'client' | 'fallback' | 'none';
+  /**
+   * 动作播放速度倍率（源码 `AttackStage` 改 `o+264`）。
+   *
+   *   52 穿透箭：`*(o+264)=5.0f`、`*(o+268)=4.0f` → 动作 5 倍速
+   *   55 玄月斩：`anim_speed >= 3.0` 才触发伤害帧
+   */
+  actionSpeed?: number;
   /** 这一条补充的出处 */
   note: string;
 }
@@ -313,6 +320,21 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         note: '源码 1267（case 0x4F3）= 1 帧闪光，这里放到 0.4 s 才看得见',
       },
     ],
+  },
+  /* ── 52 穿透箭（Penetration）────────────────────────────────────────
+   * 源码 `AttackStage` 的 `skill==52` 分支：
+   *
+   *   *(o+268)=4.0f; *(o+264)=5.0f;      // 动作加速：anim_speed 5 倍
+   *   if (stage==3) { CreateEffect(1267); PlayBuffer(100); }
+   *                                       // stage 3 一帧的闪光 + 音效
+   *
+   * `1267 = case 0x4F3`（1 帧闪光，H5 里看不见），贯穿光已由 castOf 的
+   * `CreateJoint(1258)×2` 补上；这里只补**动作 5 倍速**，让箭“嗖”地射出去
+   * （穿透箭就该比普通弓快，否则和多重箭没区别）。
+   */
+  52: {
+    actionSpeed: 5.0,
+    note: '52 穿透箭：源码 AttackStage 把 anim_speed 设 5.0（动作加速）',
   },
   /* ── 2 陨石 ──────────────────────────────────────────────────────────
    * `ScrollOfMeteoriteEffect.TriggerImpact()`：
