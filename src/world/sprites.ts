@@ -60,6 +60,27 @@ export interface SpriteOptions {
    * 也就是把爆闪压成橙红。不给就是不染色（白）。
    */
   tint?: number;
+  /**
+   * 粒子初速度（米/秒）。对应源码 `MoveParticles` 的 `P_VELX/Y/Z`：
+   * 每个粒子 spawn 时按这个向量 + `velJitter` 随机抖动起速，
+   * 之后每一帧 `pos += vel · dt`（`Vector_AddRotated` 的简化，不做方向旋转）。
+   */
+  vel?: { x: number; y: number; z: number };
+  /** 初速度每轴随机抖动（米/秒）—— 源码每个粒子 rand() 一次，不是同速 */
+  velJitter?: number;
+  /** Z 加速度（米/秒²）：负 = 下坠（火花/碎石），正 = 上飘（烟/灰烬）。源码是逐帧累加到 velz */
+  gravity?: number;
+  /** 速度阻尼（每帧乘数 0..1）：源码 `0x4c5` 每帧 `vel *= 0.93`，让火花减速散开 */
+  drag?: number;
+  /** 动态缩放：`scale = size * (1 + grow * t)`，爆炸张开用；不想动就不给 */
+  grow?: number;
+  /**
+   * 落体是否吸附地面（火花落地即停，不穿地）。
+   * 需要 `groundZ` 回调（由上层提供当前地形高度）。
+   */
+  groundZ?: number | (() => number);
+  /** 是否绕 Z 轴匀速自转（弧度/秒）—— 源码粒子屏幕空间旋转 */
+  rotVel?: number;
 }
 
 export interface SpriteFx {
@@ -82,6 +103,19 @@ export interface SpriteFx {
   frames: { cols: number; rows: number; count: number; fps: number } | null;
   /** 落点（探针用） */
   at: { x: number; y: number; z: number };
+  /* —— 粒子物理（源码 MoveParticles 的 P_VEL / P_SCALE / 逐帧衰减）—— */
+  /** 当前速度（米/秒）；null = 非粒子 */
+  vel: THREE.Vector3 | null;
+  /** Z 加速度（米/秒²） */
+  gravity: number;
+  /** 每帧阻尼乘数（0..1） */
+  drag: number;
+  /** 动态放大（每 t 加量） */
+  grow: number;
+  /** 落体吸附的地面高度回调（火花落地停） */
+  groundZ: number | (() => number) | null;
+  /** 自转角速度（弧度/秒） */
+  rotVel: number;
   done: boolean;
 }
 
@@ -191,6 +225,14 @@ export class SpriteLayer {
     if (ground) object.rotation.z = Math.random() * Math.PI * 2;
     this.scene.add(object);
 
+    /*
+     * 粒子初速度按每个实例随机抖动（源码 `Particle_Spawn` 里几乎每个 case
+     * 都 `_rand()` 一次）。没有 `vel` 就是普通静态 sprite，保持原行为。
+     */
+    const basePos = { x: pos.x, y: pos.y, z: pos.z + (opt.lift ?? 0) };
+    const j2 = () => (Math.random() * 2 - 1) * (opt.velJitter ?? 0);
+    const vel = opt.vel ? new THREE.Vector3(opt.vel.x + j2(), opt.vel.y + j2(), opt.vel.z + j2()) : null;
+
     const fx: SpriteFx = {
       id: nextId++,
       file,
@@ -206,7 +248,13 @@ export class SpriteLayer {
       fadeIn: opt.fadeIn ?? 0.15,
       fadeOut: opt.fadeOut ?? 0.35,
       frames,
-      at: { x: pos.x, y: pos.y, z: pos.z + (opt.lift ?? 0) },
+      at: basePos,
+      vel,
+      gravity: opt.gravity ?? 0,
+      drag: opt.drag ?? 0,
+      grow: opt.grow ?? 0,
+      groundZ: opt.groundZ ?? null,
+      rotVel: opt.rotVel ?? 0,
       done: false,
     };
     this.active.push(fx);
@@ -246,9 +294,33 @@ export class SpriteLayer {
         f.material.map!.offset.set(col / f.frames.cols, row / f.frames.rows);
       }
 
-      // 轻微膨胀：原版面片是「炸开」的，纯静态大小会显得很硬
-      const grow = 1 + t * 0.18;
-      f.object.scale.setScalar(f.size * grow);
+      /* —— 粒子物理（源码 `MoveParticles`）—— */
+      if (f.vel) {
+        // `pos += vel · dt`：原版每帧 `Vector_AddRotated`（简化成直积，不做朝向旋转）
+        f.vel.z += f.gravity * dt;
+        if (f.drag > 0) {
+          const d = Math.pow(1 - f.drag, dt * 25); // 每 1/25s 乘一次，dt 缩放
+          f.vel.multiplyScalar(d);
+        }
+        f.object.position.x += f.vel.x * dt;
+        f.object.position.y += f.vel.y * dt;
+        f.object.position.z += f.vel.z * dt;
+        // 落体吸附地面：火花/碎石落地即停，不穿地（源码 `0x4c5` 用 `RequestTerrainHeight`）
+        const gz = typeof f.groundZ === 'function' ? f.groundZ() : f.groundZ;
+        if (gz !== null && f.vel.z < 0 && f.object.position.z <= gz) {
+          f.object.position.z = gz;
+          f.vel.set(0, 0, 0);
+        }
+        // 自转（屏幕空间旋转，源码 P_ROT）
+        if (f.rotVel) f.object.rotation.z += f.rotVel * dt;
+        // 粒子随年龄放大：爆炸/喷发的张开感
+        const pg = f.grow ? 1 + (f.age / f.life) * f.grow : 1;
+        f.object.scale.setScalar(f.size * pg);
+      } else {
+        // 轻微膨胀：原版面片是「炸开」的，纯静态大小会显得很硬
+        const grow = 1 + t * 0.18;
+        f.object.scale.setScalar(f.size * grow);
+      }
     }
   }
 
@@ -285,7 +357,11 @@ export class SpriteLayer {
       life: Number(f.life.toFixed(3)),
       size: f.size,
       opacity: Number(f.material.opacity.toFixed(2)),
-      pos: [f.at.x, f.at.y, f.at.z].map(n => Number(n.toFixed(2))),
+      /*
+       * 位置取**实际渲染位置**（`object.position`）而不是落点 `at`：
+       * 粒子/上升贴图会随帧移动，探针要能看到位移才算数。
+       */
+      pos: [f.object.position.x, f.object.position.y, f.object.position.z].map(n => Number(n.toFixed(2))),
     }));
   }
 }

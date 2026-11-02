@@ -7455,21 +7455,28 @@ function playCastParts(opts: {
             // spawn 是异步的，失败时没人 await —— 不接住就是「点了没反应」且控制台干净
             .catch(err => console.warn(`[skill] ${label} 特效生成失败`, err));
         } else {
-          void spriteLayer
-            .spawn(part.file, pos, {
-              size: part.size ?? 2.6,
-              life: part.life ?? 0.8,
-              ground: part.ground,
-              lift: part.lift,
-              // 火苗往上窜一点，地面法阵缓慢自转 —— 观感照原版
-              rise: part.rise ?? (part.ground ? 0 : 0.18),
-              spin: part.ground ? 0.7 : 0,
-              frames: part.frames,
-              fps: part.fps,
-              tint: part.tint,
-            })
-            .catch(err => console.warn(`[skill] ${label} 贴图特效生成失败`, err));
-        }
+        void spriteLayer
+          .spawn(part.file, pos, {
+            size: part.size ?? 2.6,
+            life: part.life ?? 0.8,
+            ground: part.ground,
+            lift: part.lift,
+            // 火苗往上窜一点，地面法阵缓慢自转 —— 观感照原版
+            rise: part.rise ?? (part.ground ? 0 : 0.18),
+            spin: part.ground ? 0.7 : 0,
+            frames: part.frames,
+            fps: part.fps,
+            tint: part.tint,
+            // 粒子物理（源码 Particle_Spawn / MoveParticles）
+            vel: part.vel,
+            velJitter: part.velJitter,
+            gravity: part.gravity,
+            drag: part.drag,
+            grow: part.grow,
+            rotVel: part.rotVel,
+          })
+          .catch(err => console.warn(`[skill] ${label} 贴图特效生成失败`, err));
+      }
       };
 
       /*

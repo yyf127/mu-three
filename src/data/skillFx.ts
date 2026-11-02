@@ -126,6 +126,17 @@ export interface FxPart {
    * 源码 244 的落地在 life==3（总 20 帧）→ 0.68 s。
    */
   delay?: number;
+  /* —— 粒子物理（源码 `Particle_Spawn` / `MoveParticles`）——
+   * `vel` / `velJitter` / `gravity` 在上面已有（碎石/陨石共用），
+   * 这里只补粒子特有的四个运动学项。 */
+  /** 速度阻尼（每 1/25s 乘 1-drag，0..1） */
+  drag?: number;
+  /** 随生命期放大系数：`scale = size * (1 + grow·t)` */
+  grow?: number;
+  /** 落体吸附地形高度（火花落地即停） */
+  groundZ?: number | (() => number);
+  /** 屏幕空间自转角速度（弧度/秒） */
+  rotVel?: number;
   /** 出处或替补说明 */
   note?: string;
 }
@@ -371,6 +382,135 @@ function spriteLife(type: number): number {
   const sec = frames ? frames / 25 : 0.8;
   return Math.min(3.2, Math.max(0.3, sec));
 }
+
+/**
+ * 粒子物理表 —— 源码 `Particle_Spawn.cpp`（初始化）`Particle_Move.cpp`（逐帧）
+ * 的近似。键用**十进制**（与 `SKILL_CASTS` / `EFFECT_TEXTURES` 一致），
+ * 16 进制 ↔ 10 进制对照（0x4ab=1195, 0x4ad=1197, 0x4bf=1215, 0x4c4=1220,
+ * 0x4c5=1221, 0x4d9=1241, 0x567=1383, 0x498=1176, 0x4a7=1191, 0x4d2=1234,
+ * 0x4ce=1230）。每个 type 的运动学是**专属**的，数值全有出处。
+ *
+ * 只是「观感近似」—— 源码里粒子是 3000 个槽位的持续喷发系统，我们按
+ * 一次性放 N 个 + 各自物理推进，覆盖高频观感、不照搬全套状态机。
+ */
+const PARTICLE_PHYS: Record<
+  number,
+  {
+    /** 初速度 XYZ（米/秒） */
+    vel?: { x: number; y: number; z: number };
+    /** 每轴随机抖动（米/秒） */
+    velJitter?: number;
+    /** Z 加速度（米/秒²）；负 = 下坠，正 = 上飘 */
+    gravity?: number;
+    /** 速度阻尼（每 1/25s 乘 1-drag） */
+    drag?: number;
+    /** 随生命期放大（`size * (1+grow·t)`） */
+    grow?: number;
+    /** 屏幕自转角速度（弧度/秒） */
+    rotVel?: number;
+    /** 出处 */
+    note: string;
+  }
+> = {
+  // 1195 (0x4ab) —— 火焰/烟：`P_GRAV += const; POSZ += GRAV·dt` → 上飘
+  // `SCALE -= const` → 飘散衰减；sub 5/6/8 `ROT += const` → 旋转
+  1195: {
+    vel: { x: 0, y: 0, z: 0.6 },
+    velJitter: 0.35,
+    gravity: 0.55,
+    grow: 0.9,
+    rotVel: 0.8,
+    note: '烟尘：上飘 + 放大飘散 + 自转（Particle_Move 0x4ab）',
+  },
+  // 1197 (0x4ad) —— 烟（同 0x4ab，略小）
+  1197: {
+    vel: { x: 0, y: 0, z: 0.5 },
+    velJitter: 0.3,
+    gravity: 0.5,
+    grow: 0.8,
+    rotVel: 0.7,
+    note: '烟尘（同 0x4ab，略小）',
+  },
+  // 1215 (0x4bf) —— 扬尘：贴地烟圈，`FRAME = (0x14 - life) / 2` → 随寿命淡出
+  1215: {
+    vel: { x: 1.2, y: 1.2, z: 0.4 },
+    velJitter: 1.1,
+    gravity: -0.6,
+    grow: 0.7,
+    note: '扬尘：水平散开 + 略下落 + 放大（0x4bf）',
+  },
+  // 1220 (0x4c4) —— 火花：`FRAME` 随寿命、`SCALE` 增减 → 张开的喷发
+  1220: {
+    vel: { x: 1.7, y: 1.7, z: 1.9 },
+    velJitter: 1.6,
+    gravity: -4.4,
+    grow: 0.45,
+    note: '火花：爆炸喷发 + 下坠（0x4c4，vel 全向随机）',
+  },
+  // 1221 (0x4c5) —— 喷发火花：life 32 帧、`vel *= 0.93` 每帧、贴地
+  1221: {
+    vel: { x: 2.3, y: 2.3, z: 2.2 },
+    velJitter: 2.0,
+    gravity: -3.2,
+    drag: 0.07,
+    grow: -0.2,
+    note: '喷发：阻尼散开 + 下坠 + 缩回（0x4c5）',
+  },
+  // 1241 (0x4d9) —— 随机飞舞：每帧 ±10 单位/帧 级抖动（约 ±0.4 m/s）
+  1241: {
+    vel: { x: 0.5, y: 0.5, z: 0.5 },
+    velJitter: 0.9,
+    gravity: 0.35,
+    rotVel: 1.3,
+    note: '随机飞舞：持续抖动 + 上飘（0x4d9）',
+  },
+  // 1430 (0x596) —— 火舌粒子，随寿命衰减
+  1430: {
+    vel: { x: 0.4, y: 0.4, z: 0.9 },
+    velJitter: 0.55,
+    gravity: 0.45,
+    grow: 0.5,
+    note: '火舌粒子：上窜 + 放大（0x596）',
+  },
+  // 1383 (0x567) —— 血雾（`blood01`），下坠
+  1383: {
+    vel: { x: 0.4, y: 0.4, z: -0.3 },
+    velJitter: 0.5,
+    gravity: -0.8,
+    grow: 0.2,
+    note: '血雾：下坠散开（0x567）',
+  },
+  // 1176 (0x498) —— 血（`Spark03` 贴图），水平喷溅 + 下坠
+  1176: {
+    vel: { x: 1.9, y: 1.9, z: 0.7 },
+    velJitter: 1.7,
+    gravity: -5.5,
+    note: '血溅：水平喷出 + 重力下落（0x498）',
+  },
+  // 1191 (0x4a7) —— 火花四溅（sub 0: 上冲；sub 2: 长寿命随机）
+  1191: {
+    vel: { x: 1.1, y: 1.1, z: 2.3 },
+    velJitter: 1.4,
+    gravity: -4.8,
+    rotVel: 2.0,
+    note: '火花四溅：上冲 + 下坠 + 自转（0x4a7）',
+  },
+  // 1234 (0x4d2) —— 闪烁粒子（`SCALE` 正弦 + `LR/LG/LB` 线性衰减）：蓝白闪光
+  1234: {
+    vel: { x: 0, y: 0, z: 0.25 },
+    velJitter: 0.2,
+    gravity: 0,
+    grow: 0.35,
+    note: '闪烁：慢升 + 微放大（0x4d2）',
+  },
+  // 1230 (0x4ce) —— 涟漪（`SCALE = sin(life)`）：水平张开后收回
+  1230: {
+    vel: { x: 0.9, y: 0.9, z: 0 },
+    velJitter: 0.4,
+    grow: 1.4,
+    note: '涟漪：摊开 + 放大（0x4ce sin 缩放）',
+  },
+};
 
 /**
  * 关节（`Joint_Create`）用的替代贴图。
@@ -984,6 +1124,20 @@ export function castOf(skill: SkillEntry): CastSpec {
         if (isExtra && !EFFECT_MODELS[fx.type]) {
           const texture = EFFECT_TEXTURES[fx.type];
           if (texture) {
+            /*
+             * 粒子（`Particle_Spawn`）不能当成静态 sprite —— 源码每个粒子是
+             * 带速度/重力/缩放衰减的个体（`MoveParticles`），静态贴图看起来
+             * 就是「一堆纸片」。
+             *
+             * 这里按源码 `Particle_Spawn.cpp` 的运动学给常见 type 挂物理参数：
+             *   - 0x4ab/0x4ad 烟尘：`GRAV += …`、`POSZ += GRAV` → 上飘 + 缩放衰减
+             *   - 0x4bf 扬尘：贴地、随 life 缩放衰减
+             *   - 0x4c4 火花：寿命帧序 + 阻尼散开
+             *   - 0x4c5 喷发：vel *= 0.93 每帧（约 2.2 m/s 衰减）+ 贴地
+             *   - 0x4d9 随机飞舞：±10 单位/帧 级抖动
+             * 没登记的仍退化为静态 sprite，但保留随机抖动避免「一团死纸片」。
+             */
+            const phys = PARTICLE_PHYS[fx.type];
             return {
               kind: 'sprite' as const,
               file: texture,
@@ -994,7 +1148,13 @@ export function castOf(skill: SkillEntry): CastSpec {
               ground: false,
               lift: 1.1,
               spread: fx.count > 1 ? 0.7 : 0,
-              note: `Particle_Spawn(${fx.type}) → ${texture}`,
+              vel: phys?.vel,
+              velJitter: phys?.velJitter,
+              gravity: phys?.gravity,
+              drag: phys?.drag,
+              grow: phys?.grow,
+              rotVel: phys?.rotVel,
+              note: `Particle_Spawn(${fx.type}) → ${texture}${phys ? `（${phys.note}）` : ''}`,
             };
           }
         }
