@@ -122,6 +122,13 @@ export interface FxPart {
    */
   segments?: number;
   /**
+   * 光束逐帧抖动强度（0..1，只有 `segments > 1` 时有效）。
+   *
+   * 源码 `MoveJoint` 每帧 `rand()` 重算 joint 端点 —— 原版的电光/光带是
+   * **每帧跳动**的，不是一根定死的直线。给 0.2~0.5 就有明显的电弧跳动。
+   */
+  jitter?: number;
+  /**
    * 延迟多少秒再生成（`weaponSlam` 的落地件用）。
    * 源码 244 的落地在 life==3（总 20 帧）→ 0.68 s。
    */
@@ -1375,7 +1382,10 @@ export function castOf(skill: SkillEntry): CastSpec {
           size: 0.42,
           life: 0.4,
           aim: true,
-          note: '52 穿透箭：CreateJoint(1258)×2 @目标（JointLaser01 贯穿光）',
+          // 源码 CreateJoint(1258) 是 MoveJoint 每帧驱动的动态关节
+          segments: 3,
+          jitter: 0.25,
+          note: '52 穿透箭：CreateJoint(1258)×2 @目标（JointLaser01 贯穿光，逐帧抖动）',
         },
       ];
     }

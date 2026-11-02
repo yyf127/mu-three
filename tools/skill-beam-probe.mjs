@@ -43,7 +43,7 @@ try {
         const list = await sk.loadSkills();
         const s = m.castOf(list.find(x => x.id === 55));
         return JSON.stringify({
-          parts: s.parts.map(p => ({ kind: p.kind, file: p.file, segments: p.segments ?? 1, aim: !!p.aim, life: p.life })),
+          parts: s.parts.map(p => ({ kind: p.kind, file: p.file, segments: p.segments ?? 1, jitter: p.jitter ?? 0, aim: !!p.aim, life: p.life })),
         });
       } catch (e) { return JSON.stringify({ _err: String(e && e.stack || e) }); }
     })()`)
@@ -54,6 +54,7 @@ try {
   const jt = beams.find(p => p.file === 'Effect/JointThunder01.OZJ');
   check('55 的 beam 用 JointThunder01（源码每段 1254）', !!jt, JSON.stringify(beams));
   check('55 的 beam segments === 8（源码 0x4EE 八段链）', !!jt && jt.segments === 8, `segments=${jt?.segments}`);
+  check('55 的 beam 带 jitter（逐帧抖动）', !!jt && jt.jitter > 0, `jitter=${jt?.jitter}`);
 
   console.log('\n[B] 放 55 后实际存活的光束');
   await c.ev(`__MU_APP__.castSkill(55)`);
@@ -66,6 +67,26 @@ try {
   const b = beamsLive.find(x => x.file === 'Effect/JointThunder01.OZJ');
   check('活体里含 JointThunder01', !!b, JSON.stringify(beamsLive));
   check('活体 segments === 8', !!b && b.segments === 8, `segments=${b?.segments}`);
+
+  console.log('\n[D] jitter 生效：分段节点逐帧变化');
+  /*
+   * fxBeams() 的 snapshot 带了各段 mesh 的实际位置（nodes）。
+   * 抖动是「每 0.05s 重摆一次节点」，两次采样点不同即证明在跳。
+   */
+  const nodesOf = `JSON.stringify(__MU_APP__.fxBeams().filter(b => b.file === 'Effect/JointThunder01.OZJ')[0]?.nodes ?? [])`;
+  await c.ev(`__MU_APP__.castSkill(55)`);
+  await sleep(260);
+  const p1 = JSON.parse(await c.ev(nodesOf));
+  await sleep(180);
+  const p2 = JSON.parse(await c.ev(nodesOf));
+  const moved =
+    p1.length >= 2 &&
+    p2.length === p1.length &&
+    p1.some((a, i) => {
+      const c2 = p2[i];
+      return c2 && (Math.abs(a[0] - c2[0]) > 0.005 || Math.abs(a[1] - c2[1]) > 0.005 || Math.abs(a[2] - c2[2]) > 0.005);
+    });
+  check('分段节点位置随帧变化（jitter 生效）', moved, `p1=${JSON.stringify(p1)} p2=${JSON.stringify(p2)}`);
 
   console.log('\n[C] 淡出时序（opacity 随 age 下降）');
   await sleep(150);

@@ -35,6 +35,13 @@ export interface BeamOptions {
    * 视觉上就是原版那种「一段一段的闪电链」而不是一根直棍。
    */
   segments?: number;
+  /**
+   * 逐帧抖动强度（0..1）：源码 `MoveJoint` 每帧重新 `rand()` 端点 +
+   * `MoveJoint_GenericTail` 每帧重挂 1254 子关节 —— 所以原版的电光/光带是
+   * **每帧跳动**的，不是一根定死的直线。给了这个值就每帧重算分段节点
+   * （只有 `segments > 1` 才有效果，抖动幅度 = 段长 × jitter）。
+   */
+  jitter?: number;
   /** 初始不透明度，默认 0.9 */
   opacity?: number;
 }
@@ -51,6 +58,14 @@ export interface BeamFx {
   baseOpacity: number;
   from: THREE.Vector3;
   to: THREE.Vector3;
+  /** 分段数（>1 时每帧按 jitter 重算节点） */
+  segments: number;
+  /** 逐帧抖动强度（0 = 静态） */
+  jitter: number;
+  /** 线段宽度（重算节点时用） */
+  width: number;
+  /** 上次重算抖动的时刻（节流用，避免每帧都跳） */
+  lastJitter: number;
   done: boolean;
 }
 
@@ -125,35 +140,34 @@ const Y_AXIS = new THREE.Vector3(0, 1, 0);
  * 源码 0x4EE 的 8 段链每段位置是「上一段末尾 + 旋转后的朝下向量」，天然形成
  * 一条带垂直落差的折线。我们这里按距离均分后再把中间节点在**垂直平面**
  * （沿 A→B 方向的横向 + 上下）随机抖动，形成「一段段」的闪电链观感。
+ *
+ * `jitterScale` 控制抖动幅度占段长的比例（默认 0.35）；逐帧抖动时传
+ * `jitter` 系数复用同一套几何，只是幅度不同。
  */
 function chainPoints(
   a: THREE.Vector3,
   b: THREE.Vector3,
   n: number,
+  jitterScale = 0.35,
   rng: () => number = Math.random
 ): THREE.Vector3[] {
   if (n <= 1) return [];
   const dir = new THREE.Vector3().subVectors(b, a);
   const len = dir.length();
   if (len < 1e-4) return [];
-  const step = dir
-    .clone()
-    .normalize()
-    .multiplyScalar(len / n);
   // 垂直到光束方向的随机轴：取叉积生成一个正交平面
   const up = new THREE.Vector3(0, 0, 1);
   const side = new THREE.Vector3().crossVectors(dir.clone().normalize(), up);
   if (side.lengthSq() < 1e-6) side.set(1, 0, 0).cross(up); // 光束本身竖直时
   side.normalize();
-  const amp = len / n * 0.35; // 抖动幅度 = 段长的 35%（够明显又不断裂）
+  const amp = (len / n) * jitterScale;
   const pts: THREE.Vector3[] = [];
   for (let i = 1; i < n; i++) {
     const t = i / n;
     const base = a.clone().addScaledVector(dir, t);
     // 中间节点的横向抖动 + 上下抖动 —— 但两端（i=0, n）保持原位置
-    const jitter = (Math.random() * 2 - 1) * amp;
-    base.addScaledVector(side, jitter);
-    base.z += (Math.random() * 2 - 1) * amp * 0.8;
+    base.addScaledVector(side, (rng() * 2 - 1) * amp);
+    base.z += (rng() * 2 - 1) * amp * 0.8;
     pts.push(base);
   }
   return pts;
@@ -165,6 +179,45 @@ export class BeamLayer {
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
+  }
+
+  /**
+   * 把一串 mesh 按折线节点重新摆位（首尾相连）。
+   *
+   * `spawn` 用它铺初始链，`update` 用它做逐帧抖动 —— 同一套逻辑，
+   * 保证「静态链」和「动态链」的几何一致。
+   *
+   * `jitterScale` = 中间节点抖动幅度占段长的比例（0.35 = 默认闪电链观感）。
+   */
+  private layoutChain(
+    meshes: THREE.Mesh[],
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    seg: number,
+    width: number,
+    jitterScale: number
+  ): void {
+    const pts = seg > 1 ? chainPoints(a, b, seg, jitterScale) : [];
+    const nodes: THREE.Vector3[] = [a, ...pts, b];
+    for (let i = 0; i < meshes.length; i++) {
+      const p0 = nodes[i];
+      const p1 = nodes[i + 1];
+      if (!p0 || !p1) {
+        meshes[i].visible = false;
+        continue;
+      }
+      const d = p1.clone().sub(p0);
+      const l = d.length();
+      if (l < 0.05) {
+        meshes[i].visible = false;
+        continue;
+      }
+      const m = meshes[i];
+      m.visible = true;
+      m.position.copy(p0).addScaledVector(d, 0.5);
+      m.quaternion.setFromUnitVectors(Y_AXIS, d.clone().normalize());
+      m.scale.set(width, l, width);
+    }
   }
 
   async spawn(
@@ -195,61 +248,47 @@ export class BeamLayer {
 
     /*
      * 分段链：源码 0x4EE 是 8 段折线（`segments` 个 mesh 首尾相连）。
-     * 每段都用自己的方向旋转，整体仍然是一条连续的光链。
      * 只有 `segments > 1` 才走折线；默认仍是原来的单一直光束。
+     * 预建 `seg` 个 mesh，之后每帧用 layoutChain 重摆（抖动时不重建几何）。
      */
     const seg = Math.max(1, Math.floor(opt.segments ?? 1));
-    const extra: THREE.Mesh[] = [];
-    let mesh: THREE.Mesh;
-
-    // 单段直光：从 a 到 b 铺一片宽面片
-    const placeStraight = (from: THREE.Vector3, to: THREE.Vector3, name: string): THREE.Mesh => {
-      const d = to.clone().sub(from);
-      const l = d.length();
+    const jitter = Math.max(0, Math.min(1, opt.jitter ?? 0));
+    const width = opt.width;
+    const meshCount = Math.max(1, seg);
+    const meshes: THREE.Mesh[] = [];
+    for (let i = 0; i < meshCount; i++) {
       const m = new THREE.Mesh(crossGeometry(), mat);
-      m.name = name;
-      m.position.copy(from).addScaledVector(d, 0.5);
-      m.quaternion.setFromUnitVectors(Y_AXIS, d.clone().normalize());
-      m.scale.set(opt.width, Math.max(l, 0.05), opt.width);
+      m.name = seg > 1 ? `fx:beam:${opt.file}:seg` : `fx:beam:${opt.file}`;
       m.renderOrder = 12;
       this.scene.add(m);
-      return m;
-    };
-
-    if (seg > 1) {
-      const pts = chainPoints(a, b, seg);
-      let prev = a;
-      const segMeshes: THREE.Mesh[] = [];
-      for (const p of pts) {
-        const l = p.distanceTo(prev);
-        if (l < 0.05) continue;
-        segMeshes.push(placeStraight(prev, p, `fx:beam:${opt.file}:seg`));
-        prev = p;
-      }
-      const lastL = b.distanceTo(prev);
-      if (lastL >= 0.05) segMeshes.push(placeStraight(prev, b, `fx:beam:${opt.file}:seg`));
-      if (segMeshes.length === 0) {
-        // 极端退化：距离太短导致每段都 < 1mm，整体直光兜底
-        segMeshes.push(placeStraight(a, b, `fx:beam:${opt.file}`));
-      }
-      mesh = segMeshes[0];
-      extra.push(...segMeshes.slice(1));
-    } else {
-      mesh = placeStraight(a, b, `fx:beam:${opt.file}`);
+      meshes.push(m);
+    }
+    this.layoutChain(meshes, a, b, seg, width, 0.35);
+    // 退化兜底：链太短时至少让第一段可见（画成一根竖线会被 layoutChain 隐藏）
+    if (!meshes.some(m => m.visible)) {
+      const m = meshes[0];
+      m.visible = true;
+      m.position.copy(a).addScaledVector(dir, 0.5);
+      m.quaternion.setFromUnitVectors(Y_AXIS, dir.clone().normalize());
+      m.scale.set(width, len, width);
     }
 
     const fx: BeamFx = {
       id: nextId++,
       file: opt.file,
-      mesh,
+      mesh: meshes[0],
       // 分段链的附属 mesh 也要随主 mesh 一起淡出/移除
-      extra,
+      extra: meshes.slice(1),
       material: mat,
       age: 0,
       life: Math.max(0.08, opt.life),
       baseOpacity: opt.opacity ?? 0.9,
       from: a,
       to: b,
+      segments: seg,
+      jitter,
+      width,
+      lastJitter: 0,
       done: false,
     };
     this.active.push(fx);
@@ -267,6 +306,17 @@ export class BeamLayer {
       const t = f.age / f.life;
       // 前半段保持亮、后半段收窄淡出 —— 闪电是「一瞬间」的
       f.material.opacity = f.baseOpacity * Math.max(0, 1 - t * t);
+
+      /*
+       * 逐帧抖动：源码 `MoveJoint` 每帧对 joint 位置 `pos += rotated(vel)` +
+       * `rand()` 重算端点，所以电光/光带是**跳动**的。
+       * 这里每 ~0.05 s（≈25fps 一帧）重摆一次折线节点，节流避免每帧重建。
+       */
+      if (f.jitter > 0 && f.segments > 1 && f.age - f.lastJitter >= 0.05) {
+        f.lastJitter = f.age;
+        const meshes = [f.mesh, ...f.extra];
+        this.layoutChain(meshes, f.from, f.to, f.segments, f.width, f.jitter);
+      }
     }
   }
 
@@ -300,10 +350,20 @@ export class BeamLayer {
       life: f.life,
       // 分段链 = 1（主干）+ 附属段数；直光 = 1
       segments: 1 + f.extra.length,
+      jitter: f.jitter,
       from: [f.from.x, f.from.y, f.from.z].map(n => Number(n.toFixed(2))),
       to: [f.to.x, f.to.y, f.to.z].map(n => Number(n.toFixed(2))),
       len: Number(f.from.distanceTo(f.to).toFixed(2)),
       opacity: Number(f.material.opacity.toFixed(2)),
+      /*
+       * 各段 mesh 的当前位置（探针断言 jitter 真的在逐帧重摆节点）。
+       * 只取前 4 段够用，避免 snapshot 过大。
+       */
+      nodes: [f.mesh, ...f.extra].slice(0, 4).map(m => [
+        Number(m.position.x.toFixed(3)),
+        Number(m.position.y.toFixed(3)),
+        Number(m.position.z.toFixed(3)),
+      ]),
     }));
   }
 }

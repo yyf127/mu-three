@@ -7231,6 +7231,7 @@ function playCastParts(opts: {
               width: part.size ?? 0.4,
               life: part.life ?? 0.3,
               segments: part.segments,
+              jitter: part.jitter,
             })
             .catch(err => console.warn(`[skill] ${label} 命中光束生成失败`, err));
           continue;
@@ -7258,7 +7259,13 @@ function playCastParts(opts: {
               .spawn(
                 { x: aim.x + Math.cos(a1) * d1, y: aim.y + Math.sin(a1) * d1, z: z1 },
                 { x: aim.x + Math.cos(a2) * d2, y: aim.y + Math.sin(a2) * d2, z: z2 },
-                { file: part.file, width: part.size ?? 0.3, life: part.life ?? 0.3 }
+                {
+                  file: part.file,
+                  width: part.size ?? 0.3,
+                  life: part.life ?? 0.3,
+                  segments: part.segments,
+                  jitter: part.jitter,
+                }
               )
               .catch(err => console.warn(`[skill] ${label} 体表电弧生成失败`, err));
           }
@@ -7278,6 +7285,8 @@ function playCastParts(opts: {
               file: part.file,
               width: part.size ?? 0.36,
               life: part.life ?? 0.3,
+              segments: part.segments,
+              jitter: part.jitter,
             })
             .catch(err => console.warn(`[skill] ${label} 光束生成失败`, err));
         }

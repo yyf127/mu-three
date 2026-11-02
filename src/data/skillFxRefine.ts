@@ -309,7 +309,9 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         life: 0.55,
         aim: true,
         segments: 8,
-        note: '源码 1168（Effect_Create case 0x490）→ MoveEffect 30 帧 → Joint_Create(0x4EE)：8 段链，每段 1254 JointThunder ×2 + 1195 粒子',
+        // 源码 MoveEffect 每帧重算 0x4EE 链的 8 段位置 → 电光逐帧跳动
+        jitter: 0.3,
+        note: '源码 1168（Effect_Create case 0x490）→ MoveEffect 30 帧 → Joint_Create(0x4EE)：8 段链，每段 1254 JointThunder ×2 + 1195 粒子（逐帧抖动）',
       },
       {
         kind: 'flash',
@@ -716,7 +718,10 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         spread: 0.55,
         lift: 1.0,
         delay: 0.16,
-        note: '受击者身上随机两点间的电弧（wiki：每 2 帧一道、共 35 帧）',
+        // 源码每 2 帧在新骨骼间重挂一道 JointThunder → 电弧逐帧跳动
+        segments: 4,
+        jitter: 0.4,
+        note: '受击者身上随机两点间的电弧（wiki：每 2 帧一道、共 35 帧，逐帧抖动）',
       },
     ],
   },
