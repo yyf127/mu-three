@@ -7452,6 +7452,11 @@ function playCastParts(opts: {
       const spread = part.spread ?? 0;
       const spawnOne = (i: number) => {
         const pos = fxAnchor(part.anchor, caster, aim, spread, seed++);
+        /*
+         * 逐件递增高度（源码 `AttackStage skill==56` 的 `a[2] += 20.0f`）：
+         * 第 k 件在 lift 之上再抬高 `k * liftStep`，把 5 道雷叠成竖排。
+         */
+        if (part.liftStep) pos.z += i * part.liftStep;
 
         /*
          * 碎石 / 图集爆闪（wiki 补充件，见 `skillFxRefine.ts`）：

@@ -73,6 +73,14 @@ export interface FxPart {
   /** 额外高度（米） */
   lift?: number;
   /**
+   * 逐件递增高度（米）：第 k 件额外抬高 `k * liftStep`。
+   *
+   * 源码 `AttackStage skill==56`（天雷闪）里
+   *   `for (i<5) { CreateEffect(203, ..., a); a[2] += 20.0f; }`
+   * —— 5 道雷从低到高叠成一道竖排，而不是水平散开。
+   */
+  liftStep?: number;
+  /**
    * 贴图每秒上浮多少米（`sprite` 专用）。
    *
    * 默认 `0.18`（火苗往上窜一点），地面法阵用 `0`。
@@ -701,14 +709,30 @@ const ATTACK_STAGE_EXTRAS: Record<number, FxPart[]> = {
     },
   ],
   56: [
+    /*
+     * `AttackStage skill==56`（`Combat_AttackStage.cpp:364`）：
+     *   float a[3] = { o[28], o[32], o[36] - 40.0f };   // 角度取自身，起点比自身低 0.4 格
+     *   for (i < 5) { CreateEffect(203, o+16, a, o+232, sub=2, o, -1, 0); a[2] += 20.0f; }
+     *     // 5 次，每次**高度 +20 单位 = +0.2 格**，沿 z 叠成一道竖排
+     *   PlayBuffer(84); c[757] = 15;
+     *
+     * `Effect_Create case 0xCB`（203 = `Skill/Magic02.bmd`）：
+     *   `[0x18] = 2.8026e-44` → 寿命 2 帧；`[0x31] = -60` → 沿 -Y 推 **-15 m/s**；
+     *   且**只有 sub==2 才继续**（其它 subtype 直接 return，什么都不做）。
+     *
+     * 之前写成 `count:5 + spread:0.8`（水平散开），但源码是**垂直叠高**
+     * （a[2] 从 -0.4 格每次 +0.2），方向完全不对，而且漏了 sub=2。
+     */
     {
       kind: 'model',
       file: EFFECT_MODELS[203],
       anchor: 'self',
       count: 5,
       scale: 1,
-      spread: 0.8,
-      note: 'AttackStage skill==56 → CreateEffect(203) ×5，角度每次 +20°',
+      lift: -0.4, // 源码 `o[36] - 40.0f` = 起点低 0.4 格
+      liftStep: 0.2, // 源码 `a[2] += 20.0f` → 每件 +0.2 格（叠成竖排）
+      vel: { x: 0, y: -15, z: 0 }, // 源码 `[0x31] = -60` 单位/帧 → -15 m/s
+      note: 'AttackStage skill==56 → CreateEffect(203) sub2 ×5（起点 z-0.4 格、每件 +0.2 格、沿 -Y 15 m/s）',
     },
   ],
 };

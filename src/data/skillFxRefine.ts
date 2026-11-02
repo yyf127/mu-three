@@ -214,18 +214,22 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
    * 这里整份替换掉，按源码数量来。
    */
   48: {
-    note: '48 生命之光：1 个法阵 + 36 道竖光（源码 1264×1 + 1253×36）',
+    note: '48 生命之光：法阵 ×2（kk=0/20）+ 36 道竖光（源码 1264×2 + 1253×36，起点 z+1 格）',
     replace: [
+      /*
+       * 源码 `SecondPassword.cpp:3636` `if (!(kk % 20)) CreateEffect(1264, ...)`
+       * —— kk = 0 和 20 各一次，共 **2 个法阵**（不是 1 个）。
+       */
       {
         kind: 'sprite',
         file: 'Effect/Magic_Ground2.OZJ',
         anchor: 'self',
-        count: 1,
+        count: 2,
         size: 3.8,
         life: 1.1,
         ground: true,
         lift: 0.06,
-        note: '源码 CreateEffect(1264) @自己 sub4 → Magic_Ground2',
+        note: '源码 for(kk<36) if(!(kk%20)) CreateEffect(1264) sub4 → Magic_Ground2 ×2',
       },
       {
         kind: 'sprite',
@@ -234,11 +238,16 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         count: 36,
         size: 0.5,
         life: 0.9,
-        lift: 0.05,
-        // 源码那 36 条是「从脚往上拉」的关节；贴图层用「向上窜的光点」近似
+        /*
+         * 源码 `v396[2] = o[24] + 100.0f` —— 36 条竖光的**起点在施法者头顶 1 格**，
+         * 不是贴脚（早先 `lift: 0.05` 是错的）。
+         * 角度 `Angle[0] = -10`（俯仰）、`Angle[2] = kk * 10`（每道偏航 +10°，
+         * 36 道刚好围一圈）。
+         */
+        lift: 1.0,
         rise: 6.5,
         spread: 1.05,
-        note: '源码 for(i<36) Joint_Create(1253, 自己→自己, scale 60)',
+        note: '源码 for(kk<36) Joint_Create(1253, 自己→自己, scale60)：起点头顶 z+1 格、俯仰 -10°、偏航 kk*10°',
       },
     ],
   },

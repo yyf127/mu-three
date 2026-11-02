@@ -128,9 +128,37 @@ try {
   check('cast(19) 后有贴图特效存活', live.length > 0, JSON.stringify(live).slice(0, 160));
   if (live.length) console.log(`   存活 ${live.length} 件：${JSON.stringify(live[0]).slice(0, 120)}`);
 
+  /* ================= H. 48/56 源码对齐 ================= */
+  console.log('\n[H] 48 生命之光 / 56 天雷闪（SecondPassword.cpp 3640/3627）');
+  const h = JSON.parse(
+    await c.ev(`(async () => {
+      try {
+        const m = await import('/src/data/skillFx.ts');
+        const sk = await import('/src/data/skills.ts');
+        const list = await sk.loadSkills();
+        const pick = (id) => m.castOf(list.find(x => x.id === id)).parts.map(p => ({
+          kind: p.kind, file: p.file, count: p.count, lift: p.lift, liftStep: p.liftStep, vel: p.vel, rise: p.rise,
+        }));
+        return JSON.stringify({ s48: pick(48), s56: pick(56) });
+      } catch (e) { return JSON.stringify({ _err: String(e && e.stack || e) }); }
+    })()`)
+  );
+  if (h._err) throw new Error(h._err);
+
+  const ground48 = h.s48.find(p => p.file.includes('Magic_Ground2'));
+  check('48 法阵 ×2（源码 kk=0/20 触发两次）', !!ground48 && ground48.count === 2, JSON.stringify(ground48));
+  const bolts48 = h.s48.find(p => p.file.includes('JointSpirit'));
+  check('48 竖光 ×36', !!bolts48 && bolts48.count === 36, JSON.stringify(bolts48));
+  check('48 竖光起点在头顶 1 格（源码 o[24]+100）', !!bolts48 && bolts48.lift === 1, `lift=${bolts48?.lift}`);
+
+  const beam56 = h.s56.find(p => p.kind === 'model');
+  check('56 有 5 道雷电模型', !!beam56 && beam56.count === 5, JSON.stringify(beam56));
+  check('56 起点低 0.4 格（源码 o[36]-40）', !!beam56 && beam56.lift === -0.4, `lift=${beam56?.lift}`);
+  check('56 逐件 +0.2 格（源码 a[2]+=20）', !!beam56 && beam56.liftStep === 0.2, `liftStep=${beam56?.liftStep}`);
+  check('56 沿 -Y 15 m/s（源码 [0x31]=-60）', !!beam56 && beam56.vel && beam56.vel.y === -15, JSON.stringify(beam56?.vel));
+
   /* ================= F. 截图 ================= */
-  console.log('\n[F] 截图');
-  for (const [id, tag] of [[19, 'melee-19'], [6, 'teleport-06']]) {
+  console.log('\n[F] 截图');  for (const [id, tag] of [[19, 'melee-19'], [6, 'teleport-06']]) {
     await c.ev(`__MU_APP__.timeScale(0.12)`);
     await c.ev(`(async () => { await __MU_APP__.cast(${id}); return 1; })()`);
     await sleep(320);

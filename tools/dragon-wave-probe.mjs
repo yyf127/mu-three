@@ -72,11 +72,23 @@ try {
   check('半径恒为 0（不绕圈）', p1.every(a => a.r < 0.001), JSON.stringify(p1.map(a => a.r)));
 
   console.log('\n[C] 朝向随帧抖动（角度在动）');
-  /* 读 Laser01 的 rotation.z，间隔采样看是否变化 */
+  /*
+   * 读 Laser01 的 `yaw`，间隔采样看是否变化。
+   * 必须先清场（上一轮的 4 条还在），否则两次采样数量不一致会误判。
+   */
   const rotGrab = `JSON.stringify(__MU_APP__.fx().filter(e => /Laser01/.test(e.file)).map(e => e.yaw))`;
+  // 等上一轮龙波自然结束
+  for (let i = 0; i < 30; i++) {
+    const cur = JSON.parse(await c.ev(rotGrab));
+    if (!cur.length) break;
+    await sleep(150);
+  }
   await c.ev(`__MU_APP__.castSkill(9)`);
-  await sleep(200);
-  const r1 = JSON.parse(await c.ev(rotGrab));
+  let r1 = [];
+  for (let i = 0; i < 20 && r1.length < 4; i++) {
+    await sleep(120);
+    r1 = JSON.parse(await c.ev(rotGrab));
+  }
   await sleep(200);
   const r2 = JSON.parse(await c.ev(rotGrab));
   const rotating =
