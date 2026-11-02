@@ -83,6 +83,53 @@ export interface SpriteOptions {
   rotVel?: number;
 }
 
+/** 发射器选项：`SpriteLayer.emit()` 的持续喷发参数 */
+export interface EmitterOptions {
+  /** 每秒发射几个粒子 */
+  rate: number;
+  /** 喷多久（秒）；不给就一直喷到手动 stop */
+  life?: number;
+  /** 发射点位置（游戏坐标） */
+  at: { x: number; y: number; z: number };
+  /** 发射点周围的随机散布半径（米） */
+  spread?: number;
+  /** 每个粒子的寿命（秒） */
+  particleLife: number;
+  /** 粒子视觉尺寸（米） */
+  size: number;
+  /** 粒子物理参数（复用 SpriteOptions 的 vel/gravity 等） */
+  phys?: Pick<
+    SpriteOptions,
+    | 'vel'
+    | 'velJitter'
+    | 'gravity'
+    | 'drag'
+    | 'grow'
+    | 'rotVel'
+    | 'tint'
+    | 'frames'
+    | 'fps'
+    | 'rise'
+  >;
+}
+
+/** 发射器运行时实例 */
+export interface Emitter {
+  id: number;
+  file: string;
+  age: number;
+  life: number; // 0 = 无限
+  rate: number;
+  at: { x: number; y: number; z: number };
+  spread: number;
+  particleLife: number;
+  size: number;
+  phys: EmitterOptions['phys'];
+  acc: number; // 发射累积器
+  stopping: boolean;
+  done: boolean;
+}
+
 export interface SpriteFx {
   id: number;
   /** 贴图路径，如 `Effect/Flame01.OZJ` */
@@ -162,6 +209,7 @@ const groundGeo = groundGeometry();
 
 export class SpriteLayer {
   readonly active: SpriteFx[] = [];
+  readonly emitters: Emitter[] = [];
   private scene: THREE.Scene;
 
   constructor(scene: THREE.Scene) {
@@ -261,7 +309,70 @@ export class SpriteLayer {
     return fx;
   }
 
+  /** 持续喷发器：按 rate 在 at 附近连续发射粒子（源码 MoveEffect 每帧 Particle_Spawn） */
+  emit(file: string, opt: EmitterOptions): Emitter {
+    const e: Emitter = {
+      id: nextId++,
+      file,
+      age: 0,
+      life: opt.life ?? 0,
+      rate: opt.rate,
+      at: opt.at,
+      spread: opt.spread ?? 0,
+      particleLife: opt.particleLife,
+      size: opt.size,
+      phys: opt.phys,
+      acc: 0,
+      stopping: false,
+      done: false,
+    };
+    this.emitters.push(e);
+    return e;
+  }
+
+  /** 手动停掉发射器（已喷出的粒子继续走完生命期） */
+  stop(emitter: Emitter) {
+    emitter.stopping = true;
+  }
+
+  private tickEmitter(e: Emitter, dt: number) {
+    e.age += dt;
+    if (e.life > 0 && e.age >= e.life) {
+      e.done = true;
+      return;
+    }
+    // 累积器：dt * rate 攒够 1 个就发一个
+    e.acc += dt * e.rate;
+    let n = Math.floor(e.acc);
+    if (n <= 0) return;
+    e.acc -= n;
+    // 每个 dt 最多发 30 个，防止掉帧后一次性喷几百个
+    n = Math.min(n, 30);
+    for (let i = 0; i < n; i++) {
+      const s = e.spread;
+      const pos = {
+        x: e.at.x + (Math.random() * 2 - 1) * s,
+        y: e.at.y + (Math.random() * 2 - 1) * s,
+        z: e.at.z,
+      };
+      void this.spawn(e.file, pos, {
+        size: e.size,
+        life: e.particleLife,
+        ...e.phys,
+      }).catch(() => {});
+    }
+  }
+
   update(dt: number) {
+    for (let i = this.emitters.length - 1; i >= 0; i--) {
+      const e = this.emitters[i];
+      if (e.done) {
+        this.emitters.splice(i, 1);
+        continue;
+      }
+      this.tickEmitter(e, dt);
+    }
+
     for (let i = this.active.length - 1; i >= 0; i--) {
       const f = this.active[i];
       f.age += dt;
@@ -341,6 +452,13 @@ export class SpriteLayer {
 
   clear() {
     for (let i = this.active.length - 1; i >= 0; i--) this.remove(i);
+    // 发射器也要清：进图/切图时不留喷发残留
+    this.emitters.length = 0;
+  }
+
+  /** 当前活着的发射器数量（探针计数用） */
+  get emitterCount() {
+    return this.emitters.length;
   }
 
   /** 预热贴图（进图时把技能要用的贴图拉下来） */
@@ -362,6 +480,20 @@ export class SpriteLayer {
        * 粒子/上升贴图会随帧移动，探针要能看到位移才算数。
        */
       pos: [f.object.position.x, f.object.position.y, f.object.position.z].map(n => Number(n.toFixed(2))),
+    }));
+  }
+
+  /** 发射器快照（探针断言「持续喷发真的在喷」） */
+  emitterSnap() {
+    return this.emitters.map(e => ({
+      id: e.id,
+      file: e.file,
+      age: Number(e.age.toFixed(3)),
+      life: e.life,
+      rate: e.rate,
+      at: [e.at.x, e.at.y, e.at.z].map(n => Number(n.toFixed(2))),
+      acc: Number(e.acc.toFixed(3)),
+      done: e.done,
     }));
   }
 }

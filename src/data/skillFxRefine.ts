@@ -410,7 +410,9 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         life: 3.5,
         lift: 0,
         delay: 0.34,
-        note: '撞击火柱第 1 层（wiki：0 格高、缩放 1、3.5 s）',
+        // 源码火柱是持续燃烧的：`SpawnImpactFire` 存活期每帧喷火苗
+        emit: { type: 1195, perSec: 12, spread: 0.8, particleLife: 0.7, size: 0.75 },
+        note: '撞击火柱第 1 层（wiki：0 格高、缩放 1、3.5 s）+ 持续喷焰',
       },
       {
         kind: 'sprite',
@@ -455,7 +457,9 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         life: 0.75,
         lift: 0.25,
         spread: 1.0,
-        note: '火焰粒子（wiki：地面 2×2 格 + flame particles）',
+        // 5 簇火苗是持续喷发：地面片存活期每 0.35s 喷一颗火焰粒子上飘
+        emit: { type: 1195, perSec: 12, spread: 1.2, particleLife: 0.75, size: 0.6 },
+        note: '火焰粒子（wiki：地面 2×2 格 + flame particles 持续喷发）',
       },
     ],
   },
@@ -490,7 +494,9 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         lift: 0.2,
         spread: 0.9,
         delay: 0.05,
-        note: '沿路烟尘（wiki：Effect/smoke02，每 0.035 s 一颗）',
+        // 源码龙卷风是「沿路每帧冒烟」：给烟配持续喷发器（0xe0 龙卷尘）
+        emit: { type: 1197, perSec: 10, spread: 1.2, particleLife: 0.9, size: 1.0 },
+        note: '沿路烟尘（wiki：Effect/smoke02，每 0.035 s 一颗）+ 持续喷烟',
       },
     ],
   },

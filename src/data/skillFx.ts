@@ -137,6 +137,28 @@ export interface FxPart {
   groundZ?: number | (() => number);
   /** 屏幕空间自转角速度（弧度/秒） */
   rotVel?: number;
+  /**
+   * 持续发射器（源码 `MoveEffect` 每帧 `Particle_Spawn`）：
+   * 给这件 sprite 配一个「按 rate 连续喷子粒子」的发射器，
+   * 子粒子用 `emit.type` 的纹理 + `emit.phys` 物理参数。
+   *
+   * 原版 `0xbf` 坠地烟、`0x4f3` 血喷、`0xcb` 陨石火、`0xe0` 龙卷尘都是
+   * 效果存活期**每帧**喷 1~2 个粒子 —— 不是一次性放 N 个。
+   */
+  emit?: {
+    /** 子粒子 type（查 `EFFECT_TEXTURES` / `PARTICLE_PHYS`） */
+    type: number;
+    /** 每秒几个 */
+    perSec: number;
+    /** 发射器存活秒数（默认 = 所在件 life） */
+    life?: number;
+    /** 发射点散布半径（米） */
+    spread?: number;
+    /** 子粒子寿命（秒，默认 0.8） */
+    particleLife?: number;
+    /** 子粒子尺寸（默认取粒子尺寸 0.9） */
+    size?: number;
+  };
   /** 出处或替补说明 */
   note?: string;
 }
@@ -511,6 +533,47 @@ const PARTICLE_PHYS: Record<
     note: '涟漪：摊开 + 放大（0x4ce sin 缩放）',
   },
 };
+
+/**
+ * 把 `part.emit` 转成 `SpriteLayer.emit()` 能直接吃的参数。
+ *
+ * 子粒子用 `EFFECT_TEXTURES[type]` 的贴图 + `PARTICLE_PHYS` 的物理参数；
+ * 如果 type 没登记贴图，返回 null（上层就该跳过发射器）。
+ */
+export function emitChildSpec(
+  emit: NonNullable<FxPart['emit']>
+): {
+  file: string;
+  rating: { rate: number; life?: number; spread?: number; particleLife?: number; size?: number };
+  phys: FxPart;
+} | null {
+  const texture = EFFECT_TEXTURES[emit.type];
+  if (!texture) return null;
+  const phys = PARTICLE_PHYS[emit.type];
+  return {
+    file: texture,
+    rating: {
+      rate: emit.perSec,
+      life: emit.life,
+      spread: emit.spread,
+      particleLife: emit.particleLife,
+      size: emit.size,
+    },
+    phys: {
+      kind: 'sprite',
+      file: texture,
+      anchor: 'self',
+      count: 1,
+      vel: phys?.vel,
+      velJitter: phys?.velJitter,
+      gravity: phys?.gravity,
+      drag: phys?.drag,
+      grow: phys?.grow,
+      rotVel: phys?.rotVel,
+      note: `Particle_Spawn(${emit.type}) → ${texture}${phys ? `（${phys.note}）` : ''}`,
+    },
+  };
+}
 
 /**
  * 关节（`Joint_Create`）用的替代贴图。

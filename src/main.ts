@@ -273,7 +273,7 @@ import { BGM_LOGIN, SKILL_SOUND } from './data/sounds';
 import { WeaponSlamLayer, WeaponWheelLayer } from './world/wheels';
 import { MONSTER_ACTION, PLAYER_SKIN_NPCS } from './world/monsterModels';
 import { SKILL_FX, loadSkills, type SkillEntry } from './data/skills';
-import { BOW_SKILLS, castOf, sourceTag as fxTag, type CastSpec, type FxPart } from './data/skillFx';
+import { BOW_SKILLS, castOf, emitChildSpec, sourceTag as fxTag, type CastSpec, type FxPart } from './data/skillFx';
 import { manaBlock, manaBlockText } from './data/skillMana';
 import { attachIconRenderer, itemIcon, iconDebug, clearItemIcons } from './ui/itemIcon';
 import { attachCharPreviewRenderer, charPreview } from './ui/charPreview';
@@ -7455,27 +7455,71 @@ function playCastParts(opts: {
             // spawn 是异步的，失败时没人 await —— 不接住就是「点了没反应」且控制台干净
             .catch(err => console.warn(`[skill] ${label} 特效生成失败`, err));
         } else {
-        void spriteLayer
-          .spawn(part.file, pos, {
+        /*
+         * 静态贴图 + 可选持续发射器（源码 `MoveEffect` 每帧 `Particle_Spawn`）：
+         * `part.emit` 给这件 sprite 挂一个每秒喷 N 个子粒子的发射器，
+         * 子粒子用 `EFFECT_TEXTURES[type]` 贴图 + `PARTICLE_PHYS` 物理。
+         */
+        if (part.emit) {
+          const child = emitChildSpec(part.emit);
+          if (child) {
+            spriteLayer.emit(child.file, {
+              rate: child.rating.rate,
+              life: child.rating.life ?? part.life,
+              at: pos,
+              spread: child.rating.spread ?? part.spread ?? 0.6,
+              particleLife: child.rating.particleLife ?? 0.8,
+              size: child.rating.size ?? 0.9,
+              phys: {
+                vel: child.phys.vel,
+                velJitter: child.phys.velJitter,
+                gravity: child.phys.gravity,
+                drag: child.phys.drag,
+                grow: child.phys.grow,
+                rotVel: child.phys.rotVel,
+              },
+            });
+          }
+          void spriteLayer.spawn(part.file, pos, {
             size: part.size ?? 2.6,
             life: part.life ?? 0.8,
             ground: part.ground,
             lift: part.lift,
-            // 火苗往上窜一点，地面法阵缓慢自转 —— 观感照原版
             rise: part.rise ?? (part.ground ? 0 : 0.18),
             spin: part.ground ? 0.7 : 0,
             frames: part.frames,
             fps: part.fps,
             tint: part.tint,
-            // 粒子物理（源码 Particle_Spawn / MoveParticles）
             vel: part.vel,
             velJitter: part.velJitter,
             gravity: part.gravity,
             drag: part.drag,
             grow: part.grow,
             rotVel: part.rotVel,
-          })
-          .catch(err => console.warn(`[skill] ${label} 贴图特效生成失败`, err));
+          }).catch(err => console.warn(`[skill] ${label} 贴图特效生成失败`, err));
+        } else {
+          void spriteLayer
+            .spawn(part.file, pos, {
+              size: part.size ?? 2.6,
+              life: part.life ?? 0.8,
+              ground: part.ground,
+              lift: part.lift,
+              // 火苗往上窜一点，地面法阵缓慢自转 —— 观感照原版
+              rise: part.rise ?? (part.ground ? 0 : 0.18),
+              spin: part.ground ? 0.7 : 0,
+              frames: part.frames,
+              fps: part.fps,
+              tint: part.tint,
+              // 粒子物理（源码 Particle_Spawn / MoveParticles）
+              vel: part.vel,
+              velJitter: part.velJitter,
+              gravity: part.gravity,
+              drag: part.drag,
+              grow: part.grow,
+              rotVel: part.rotVel,
+            })
+            .catch(err => console.warn(`[skill] ${label} 贴图特效生成失败`, err));
+        }
       }
       };
 
@@ -13148,6 +13192,8 @@ function boot() {
     fx: () => effects.snapshot(),
     /** 当前活着的贴图特效（`Data/Effect/*`，源码里那半技能全靠它） */
     fxSprites: () => spriteLayer.snapshot(),
+    /** 当前活着的持续发射器（源码 MoveEffect 每帧 Particle_Spawn 的近似） */
+    fxEmitters: () => spriteLayer.emitterSnap(),
     /** 当前活着的关节 / 光束（源码 `Joint_Create`） */
     fxBeams: () => beamLayer.snapshot(),
     /**
