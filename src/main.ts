@@ -6980,7 +6980,7 @@ function playHurtAction(actor: Actor, kind: 'player' | 'monster' | 'npc') {
 
 
 /**
- * 黑龙波（9 / Evil Spirit）—— 「4 条 `Laser01` 贴地游动」的专用渲染器。
+ * 黑龙波（9 / Evil Spirit）—— 「4 条 `Laser01` 绕身翻腾」的专用渲染器。
  *
  * 源码 `SecondPassword.cpp` 的 `case 9`：
  *
@@ -6990,24 +6990,49 @@ function playHurtAction(actor: Actor, kind: 'player' | 'monster' | 'npc') {
  *     Joint_Create(1253, v399, o+16, v394, 0, o, 20.0f, -1, 0);      // 尾
  *   }
  *
- * 每帧（`MoveJoint.cpp` type 0x4E5 sub 0）：
- *   - 只有 `scale == 80` 的那 4 条会 `CreateEffect(205)` = `Skill/Laser01.bmd`
- *     （`Effect_Create case 0xcd`：寿命 1 帧、缩放 **1.3**），
- *     scale 20 的 4 条只画光带；
- *   - 目标点每帧写成「施法者 z + 80」→ 追着人游；
- *   - `MoveHumming(..., 10.0f)` 每帧转向；`+0x9c4 += (rand%32-16)*0.2` 抖动；
- *   - `terrain+100 > z` / `terrain+400 < z` 做贴地约束；
- *   - 颜色 = `lifetime * 0.1` 渐暗；`AddTerrainLight(..., 4)` 给脚下打光。
+ * ── 每帧行为（`MoveJoint.cpp` type 0x4E5 sub 0，L863-908）──────────────
+ *
+ *   `MoveHumming(pos, angle, target, turn)` —— **只把角度转向目标，
+ *      不动位置**（`SMD_Parser.cpp:745-746` 原文："NO mueve la posicion"）。
+ *      转向速率 `10.0f`（sub5 是 `2.0f`）；
+ *   `target` 每帧写成「施法者 x/y + 80 高」→ 所以是**朝施法者转向**；
+ *
+ *   if (subtype != 5) {
+ *     angle[0] += (rand()%32 - 16) * 0.2;        // 俯仰抖动
+ *     angle[2] += (rand()%32 - 16) * 0.8;        // 偏航抖动
+ *     angle[0] *= 0.6;                           // 俯仰衰减
+ *     angle[2]  累积在 +0x9cc，再 *0.8
+ *   }
+ *   // 高度夹紧：低于 terrain+100 → angle[0] = -5；高于 terrain+400 → +5
+ *   // 颜色 = lifetime * 0.1（渐暗）
+ *   // AddTerrainLight(darkness = (rand()%4+4) * -0.01) → **变暗**，不是照亮
+ *
+ * 关键：**位置整段寿命不变**（起点 = 施法者 z+100），变的只有角度。
+ * 上一版给了「绕施法者小圆漂移」，那是把「角度抖动」误解成了「位置漂移」。
+ * 现在按源码：位置钉在起点，角度朝施法者持续转向 + 每帧随机抖动。
  *
  * 我们的架构没有「关节池 + 逐帧 tick」，所以这里直接：
  *   ① 4 条 `Laser01` 常驻（源码那 1 帧寿命本质就是「每帧重出」，视觉上连续）；
- *   ② 每条绕施法者游动（角速度/半径各不相同 + 正弦呼吸 + 随机抖动），贴地；
+ *   ② 角度按源码的「转向 + rand 抖动」驱动，位置保持在起点；
  *   ③ 每 70 ms 在当前位置留一段 `JointSpirit01`，连成光带（源码 1253 的段）。
  *
- * **不要地面光圈**：源码用 `AddTerrainLight` 提亮地形顶点，不是贴圆片。
+ * **不要地面光圈**：源码用 `AddTerrainLight` 且是**负色（变暗）**。
  */
 /** 黑龙波 4 条激光的实时位置（探针核对轨迹用） */
 let dragonWaveLive: { x: number; y: number; z: number; r: number }[] = [];
+
+/**
+ * `TurnAngle2(current, target, maxTurn)` —— 把角度朝目标转，每次最多转
+ * `maxTurn` 度。差值先夹到 ±180（走最短弧）。源码 `MoveHumming` 用它转
+ * 偏航/俯仰（`SMD_Parser.cpp:764/775`）。
+ */
+function turnAngle2(current: number, target: number, maxTurn: number): number {
+  let diff = target - current;
+  while (diff > 180) diff -= 360;
+  while (diff < -180) diff += 360;
+  if (Math.abs(diff) <= maxTurn) return target;
+  return current + Math.sign(diff) * maxTurn;
+}
 
 function castDragonWave(caster: Actor) {
   if (!world) return;
@@ -7047,21 +7072,28 @@ function castDragonWave(caster: Actor) {
    */
   const SCALE = 0.85;
   const BRIGHT = 0.55;
-  /** 离地高度：源码起点 `z + 100`（1 格），目标点 `z + 80` */
+  /** 起点高度：源码 `v399 = { o.x, o.y, o.z + 100 }`（头顶 1 格） */
   const LIFT = 1.0;
+  /** 源码 `MoveHumming(..., 10.0f)`：每帧转向 10° */
+  const TURN_DEG = 10;
   const ter = world.terrain;
 
+  /** 施法者胸口高度（源码 target 每帧写成「施法者 z + 80」= +0.8 格） */
+  const tgtZ = caster.z + 0.8;
+  const startZ = ter.getHeight(caster.x, caster.y) + LIFT;
+
+  /*
+   * 4 条 joint，各自记录**角度**（源码把角度存在 `+0x28`/`+0x30`：
+   * 前者俯仰 pitch，后者偏航 yaw，单位「度」），以及抖动的累积量。
+   * 位置源码整段不变，所以这里也钉死在起点。
+   */
   const heads = Array.from({ length: 4 }, (_, k) => ({
     /** 源码 `v394 = { 0, 0, kk * 90.0f }` —— 4 个方向各差 90° */
-    ang: caster.yaw + (k * Math.PI) / 2,
-    /** 缓慢漂移的角速度：各不相同，避免 4 条同步得像齿轮 */
-    drift: (k % 2 === 0 ? 1 : -1) * (0.32 + k * 0.11),
-    /** 游动半径（格）—— 源码位置不动，这里只给很小的活动范围 */
-    radius: 0.62 + k * 0.16,
-    /** 半径/高度呼吸的相位 */
-    phase: k * 1.73,
-    /** 偏航抖动的相位（每帧随机的等效） */
-    wob: k * 2.71,
+    yaw: k * 90,
+    pitch: 0,
+    /** 抖动累积（源码 `+0x9c4` / `+0x9cc`） */
+    jitterPitch: 0,
+    jitterYaw: 0,
     node: null as Awaited<ReturnType<typeof effects.spawn>> | null,
   }));
 
@@ -7069,8 +7101,8 @@ function castDragonWave(caster: Actor) {
     for (const h of heads) {
       h.node = await effects.spawn(
         modelName('Skill/Laser01.bmd'),
-        { x: caster.x, y: caster.y, z: ter.getHeight(caster.x, caster.y) + LIFT },
-        { scale: SCALE, speed: 1.0, life: DUR, yaw: h.ang, lift: 0 }
+        { x: caster.x, y: caster.y, z: startZ },
+        { scale: SCALE, speed: 1.0, life: DUR, yaw: (h.yaw * Math.PI) / 180, lift: 0 }
       );
     }
 
@@ -7090,42 +7122,77 @@ function castDragonWave(caster: Actor) {
 
       dragonWaveLive.length = 0;
       for (const h of heads) {
-        h.ang += h.drift * 0.033;
         /*
-         * 抖动：源码 `+0x9c4 += (rand()%32-16)*0.2` / `+0x9cc` 累积，
-         * 单位是「度」，量级 ±6.4°（偏航）/ ±3.2°（俯仰）。
-         * 这里用两个不同频率的正弦叠出「不是圆周」的乱晃感。
+         * ── 源码 `MoveHumming(pfVar15, angle, target, 10.0f)` ─────────────
+         * **只把 angle 转向目标，不动位置**。目标点每帧 = 施法者 z+80。
+         * `TurnAngle2(current, target, maxTurn)`：差值夹到 ±180 后，
+         * 每次最多转 `maxTurn` 度。
+         *
+         * 水平目标就是施法者脚下（joint 位置也在施法者 x/y），两点重合 →
+         * `CreateAngle` 得 0；垂直目标从「起点 z」看向「施法者 z+80」。
          */
-        const wobYaw =
-          (Math.sin(t * 7.9 + h.wob) * 0.75 + Math.sin(t * 13.1 + h.wob * 2.3) * 0.35) * 0.42;
-        const wobPitch = Math.sin(t * 6.3 + h.phase) * 0.22;
+        const horizAngle = 0;
+        const vertAngle =
+          (Math.atan2(startZ - tgtZ, 0.001) * 180) / Math.PI;
+        // 源码 `angle[0] = 360 - vertAngle`
+        const targetPitch = 360 - vertAngle;
+        h.yaw = turnAngle2(h.yaw, horizAngle, TURN_DEG);
+        h.pitch = turnAngle2(h.pitch, targetPitch, TURN_DEG);
 
-        const r = h.radius + Math.sin(t * 1.9 + h.phase) * 0.1;
-        const a = h.ang + wobYaw;
-        const x = caster.x + Math.cos(a) * r;
-        const y = caster.y + Math.sin(a) * r;
-        // 高度：源码 z 夹在 `terrain+100` / `terrain+400` 之间，取低档
-        const z =
-          ter.getHeight(x, y) + LIFT + h.phase * 0.06 + Math.sin(t * 2.3 + h.phase) * 0.12 + wobPitch * 0.3;
+        /*
+         * ── 抖动（源码 `if (subtype != 5)` 段，L883-890）────────────────
+         *   angle[0] += (rand()%32 - 16) * 0.2;   // 俯仰
+         *   angle[2] += (rand()%32 - 16) * 0.8;   // 偏航
+         *   +0x9c4 *= 0.6;   +0x9cc = angleZ * 0.8;
+         * 注意源码是先累加到 `+0x9c4`，再 `angle += 累加值`，然后累加值衰减。
+         */
+        h.jitterPitch += (Math.floor(Math.random() * 32) - 16) * 0.2;
+        h.jitterYaw += (Math.floor(Math.random() * 32) - 16) * 0.8;
+        h.pitch += h.jitterPitch;
+        h.yaw += h.jitterYaw;
+        h.jitterPitch *= 0.6;
+        h.jitterYaw *= 0.8;
 
+        /*
+         * ── 高度夹紧（源码 L892-900）────────────────────────────────────
+         *   if (terrain + 100 > z) { jitter = 0; angle[0] = -5; }
+         *   if (terrain + 400 < z) { jitter = 0; angle[0] =  5; }
+         * 位置固定在起点，所以「z」就是 startZ；源码这里用位置 z 判，
+         * 我们按等价语义：起点已在 terrain+100，不会触发；保留判断以防将来改高度。
+         */
+        const th = ter.getHeight(caster.x, caster.y);
+        if (th + 1.0 > startZ) {
+          h.jitterPitch = 0;
+          h.pitch = -5;
+        }
+        if (th + 4.0 < startZ) {
+          h.jitterPitch = 0;
+          h.pitch = 5;
+        }
+
+        const x = caster.x;
+        const y = caster.y;
+        const z = startZ;
         dragonWaveLive.push({ x, y, z, r: Math.hypot(x - caster.x, y - caster.y) });
+
         if (h.node) {
           h.node.root.position.set(x, y, z);
           h.node.anchor = { x, y, z };
           /*
-           * 朝向：**指回施法者**（`MoveHumming` 每帧把角度转向「施法者 z+80」），
-           * 不是切线方向。`Laser01` 长轴在本地 +X，所以直接给世界角。
+           * 朝向：源码 `angle[2]` 是偏航（度），`angle[0]` 是俯仰。
+           * `Laser01` 长轴在本地 +X，世界角 = yaw，俯仰用 rotation.x 近似。
+           * 同步写回 `node.yaw`（探针断言角度在动、也是真实状态）。
            */
-          const toCenter = Math.atan2(caster.y - y, caster.x - x);
-          h.node.root.rotation.z = toCenter + wobPitch;
-          h.node.root.rotation.x += 1.7 * 0.033; // 龙身缓慢翻滚
+          const yawRad = (h.yaw * Math.PI) / 180;
+          h.node.root.rotation.z = yawRad;
+          h.node.root.rotation.x = (h.pitch * Math.PI) / 180;
+          h.node.yaw = yawRad;
           for (const m of h.node.mats) fxAlpha(m, fade * BRIGHT);
         }
 
         // 光带（源码 1253 的段）：每 70 ms 留一段在当前位置
         if (now - lastTrail >= 70) {
           void spriteLayer.spawn('Effect/JointSpirit01.OZJ', { x, y, z: z + 0.2 }, {
-            // 光带只是「尾巴」的暗示，压小压暗，别和主体糊成一团白
             size: 0.34,
             life: 0.28,
             lift: 0,
