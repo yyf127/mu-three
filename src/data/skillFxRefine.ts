@@ -247,7 +247,7 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
    * 生成表给成了 10 个（同样是 count 传递的锅）。
    */
   27: {
-    note: '27 守护之光：法阵 + 2 道环绕光（源码 1264×1 + 266×2）',
+    note: '27 守护之光：法阵 + 持续闪电爆发 + 2 道环绕光（源码 1264×1 sub2 + 266×2）',
     replace: [
       {
         kind: 'sprite',
@@ -255,10 +255,12 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         anchor: 'self',
         count: 1,
         size: 3.8,
-        life: 1.1,
+        life: 1.2,
         ground: true,
         lift: 0.06,
-        note: '源码 CreateEffect(1264) sub2',
+        // 源码 1264 sub2 ≠ 4 → MoveEffect 0x4f0 每帧 Effect_SpawnLightningBurst
+        emit: { type: 1191, perSec: 14, spread: 1.2, particleLife: 0.55, size: 0.65 },
+        note: '源码 CreateEffect(1264) sub2 → Magic_Ground2 + 持续闪电火花',
       },
       {
         kind: 'sprite',
@@ -318,7 +320,10 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         life: 0.55,
         lift: 1.2,
         tint: 0xffc46b,
-        note: '源码 1267（case 0x4F3）= 1 帧闪光，这里放到 0.4 s 才看得见',
+        // 源码 0x4f3 的 MoveEffect：存活期 3 次循环，50% Joint_Create(0x4e6) 雷
+        // / 50% Particle_Spawn(0x498=1176 火花) → 命中瞬间爆发雷火花
+        emit: { type: 1176, perSec: 30, life: 0.5, spread: 1.4, particleLife: 0.5, size: 0.6 },
+        note: '源码 1267（case 0x4F3）= 1 帧闪光 + 电/火花迸发（0x4e6/0x498），这里 flash + 持续喷',
       },
     ],
   },
@@ -423,7 +428,9 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         life: 2.8,
         lift: 0.35,
         delay: 0.34,
-        note: '撞击火柱第 2 层（wiki：0.35 格高、缩放 0.75、2.8 s）',
+        // 火柱第 2 层继续喷小火焰（rate 递减，观感是「上层的火苗更细」）
+        emit: { type: 1195, perSec: 8, spread: 0.6, particleLife: 0.6, size: 0.6 },
+        note: '撞击火柱第 2 层（wiki：0.35 格高、缩放 0.75、2.8 s）+ 持续喷焰',
       },
       {
         kind: 'sprite',
@@ -434,7 +441,8 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         life: 2.1,
         lift: 0.7,
         delay: 0.34,
-        note: '撞击火柱第 3 层（wiki：0.7 格高、缩放 0.5、2.1 s）',
+        emit: { type: 1195, perSec: 5, spread: 0.4, particleLife: 0.5, size: 0.45 },
+        note: '撞击火柱第 3 层（wiki：0.7 格高、缩放 0.5、2.1 s）+ 持续喷焰',
       },
     ],
   },
@@ -513,8 +521,20 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
    * 用 `delay` 拆成 4 批错开生成，模拟源码的「滴出来」而不是一次炸开。
    */
   10: {
-    note: '地狱火补火石 ×12（wiki：每 4 帧一颗、半径 0..3 格、向上加速 3.1）',
+    note: '地狱火补持续火苗 + 火石 ×12（wiki：每 4 帧一颗、半径 0..3 格、向上加速 3.1）',
     add: [
+      {
+        // 源码沿环持续冒火苗：`Circle01/Circle02` 45/40 帧存活期不断喷焰
+        kind: 'sprite',
+        file: 'Effect/Flame01.OZJ',
+        anchor: 'self',
+        count: 1,
+        size: 1.8,
+        life: 1.8,
+        lift: 0.3,
+        emit: { type: 1195, perSec: 6, spread: 1.2, particleLife: 0.6, size: 0.55 },
+        note: '地狱火环心持续火苗（源码火圈存活期不断燃烧）',
+      },
       {
         kind: 'debris',
         file: 'Skill/Stone01.bmd',
@@ -578,8 +598,20 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
    * 早先凭感觉给 `spread: 3.2`，环散得比源码宽一半，看着像「龙卷火」。
    */
   14: {
-    note: '毁灭烈焰补外圈爆闪 ×8 + 火花 ×8（xulek ScrollOfInfernoEffect）',
+    note: '毁灭烈焰补中心火苗 + 外圈爆闪 ×8 + 火花 ×8（xulek ScrollOfInfernoEffect）',
     add: [
+      {
+        // 源码中心 `inferno01.bmd` 存活期不断喷火苗
+        kind: 'sprite',
+        file: 'Effect/Flame01.OZJ',
+        anchor: 'self',
+        count: 1,
+        size: 1.6,
+        life: 1.1,
+        lift: 0.4,
+        emit: { type: 1195, perSec: 8, spread: 0.9, particleLife: 0.65, size: 0.6 },
+        note: '中心持续火苗（源码 Inferno01 存活期不断燃烧）',
+      },
       {
         kind: 'flash',
         file: 'Effect/Explotion01.OZJ',
@@ -637,13 +669,15 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         kind: 'sprite',
         file: 'Effect/Spark02.OZJ',
         anchor: 'self',
-        count: 10, // 源码 24 颗
+        count: 6, // 首批
         size: 0.7,
         life: 0.45,
         lift: 0.5,
         spread: 1.8,
         delay: 0.68,
-        note: '落地火星（wiki：Spark02 ×24）',
+        // 源码落地冲击波 20 帧内持续喷火星（Spark02 ×24 是累计量）
+        emit: { type: 1175, perSec: 18, spread: 1.4, particleLife: 0.45, size: 0.6 },
+        note: '落地火星（wiki：Spark02 ×24，冲击波存活期持续喷）',
       },
       {
         kind: 'debris',
@@ -683,6 +717,29 @@ export const SKILL_REFINE: Record<number, SkillRefine> = {
         lift: 1.0,
         delay: 0.16,
         note: '受击者身上随机两点间的电弧（wiki：每 2 帧一道、共 35 帧）',
+      },
+    ],
+  },
+
+  /* ── 56 天雷闪（Air Cut）─────────────────────────────────────────────
+   * 源码 `AttackStage` 的 skill==56 分支：`CreateEffect(203) ×5` 天雷弹。
+   * `MoveEffect.cpp` case 0xcb（=203 Blast01）存活期**每帧**喷 0x4c4 火花
+   * （Trace 雷鸣电闪往地面炸开），不是 5 个静止模型。
+   * 5 个 Blast01 由 `ATTACK_STAGE_EXTRAS[56]` 负责，这里给它们挂持续火花。
+   */
+  56: {
+    note: '天雷闪补持续雷电火花（源码 MoveEffect 0xcb → 0x4c4 每帧）',
+    add: [
+      {
+        kind: 'sprite',
+        file: 'Effect/Spark01.OZJ',
+        anchor: 'self',
+        count: 1,
+        size: 1.1,
+        life: 1.0,
+        lift: 0.5,
+        emit: { type: 1191, perSec: 16, spread: 1.5, particleLife: 0.6, size: 0.7 },
+        note: '天雷闪持续雷电火花（源码 0xcb 每帧 Particle_Spawn 0x4c4）',
       },
     ],
   },

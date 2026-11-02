@@ -34,7 +34,7 @@ try {
   await c.waitFor(`!!__MU_APP__.state().player`, 120000, '角色就位');
   await sleep(1500);
 
-  console.log('\n[A] castOf(2/5/8).parts 带 emit 的件');
+  console.log('\n[A] castOf(2/5/8/10/14/27/42/55/56).parts 带 emit 的件');
   const specs = JSON.parse(
     await c.ev(`(async () => {
       try {
@@ -42,13 +42,13 @@ try {
         const sk = await import('/src/data/skills.ts');
         const list = await sk.loadSkills();
         const out = {};
-        for (const id of [2, 5, 8]) {
+        for (const id of [2, 5, 8, 10, 14, 27, 42, 55, 56]) {
           const s = list.find(x => x.id === id);
           if (!s) { out[id] = { ok: false, reason: 'no-skill' }; continue; }
           const spec = m.castOf(s);
           out[id] = {
             ok: true,
-            maybeEmit: spec.parts.filter(p => p.kind === 'sprite').map(p => ({
+            maybeEmit: spec.parts.filter(p => p.kind === 'sprite' || p.kind === 'flash').map(p => ({
               file: p.file, emit: p.emit ?? null,
             })),
           };
@@ -59,7 +59,7 @@ try {
   );
   if (specs._err) throw new Error(specs._err);
 
-  for (const id of [2, 5, 8]) {
+  for (const id of [2, 5, 8, 10, 14, 27, 42, 55, 56]) {
     const s = specs[id];
     const e = s.maybeEmit.find(p => p.emit);
     check(`技能 ${id} 有带 emit 的 sprite 件`, !!e, JSON.stringify(s.maybeEmit).slice(0, 300));
