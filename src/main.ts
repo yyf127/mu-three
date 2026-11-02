@@ -3093,6 +3093,14 @@ const effects = new EffectLayer(scene);
  * （火焰、魔法阵、雷电、灵魂连线），只有模型层的话这些技能会「什么都不出」。
  */
 const spriteLayer = new SpriteLayer(scene);
+/*
+ * 把「在某点放一颗粒子」注入特效层 —— 源码 `MoveEffect` 的弹体飞行途中
+ * `rand()%10==0` 会 `Particle_Spawn(0x4c5)` 喷尾迹火星。用回调注入避免
+ * effects ↔ sprites 直接互相 import。
+ */
+effects.trailSpawner = (file, pos, opt) => {
+  void spriteLayer.spawn(file, pos, opt as never).catch(() => {});
+};
 /** 关节 / 连线（源码 `Joint_Create`）：两点之间的一道光 */
 const beamLayer = new BeamLayer(scene);
 /**
@@ -7394,6 +7402,11 @@ function playCastParts(opts: {
               vel: part.vel,
               velJitter: part.velJitter,
               gravity: part.gravity,
+              // 源码通用阶梯：减速 / 缩小 / 尾迹（MoveEffect LAB_004695b5）
+              drag: part.drag,
+              shrink: part.shrink,
+              trailEvery: part.trailEvery,
+              trailFile: part.trailFile,
               glow: false,
             })
             .catch(err => console.warn(`[skill] ${label} 碎石生成失败`, err));
@@ -7445,6 +7458,12 @@ function playCastParts(opts: {
               // 源码轨迹：陨石从离地 4 m 处以 -50 单位/帧 砸下来
               drop: part.drop,
               vel: part.vel,
+              // 源码通用阶梯：垂直加速（gravity）、减速（drag）、缩小、尾迹
+              gravity: part.gravity,
+              drag: part.drag,
+              shrink: part.shrink,
+              trailEvery: part.trailEvery,
+              trailFile: part.trailFile,
               // 追踪弹：从落点直线飞到目标（源码 param_5=1 / param_6=Owner）
               // 落点高度默认取胸口 1.1 m；龙卷风这种贴地的用 `lift: 0`
               flyTo:

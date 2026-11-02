@@ -124,6 +124,16 @@ export interface SpawnOptions {
    */
   gravity?: number;
   /**
+   * 水平速度衰减（每 1/25 s 乘 `1-drag`）；源码通用阶梯 `vel *= 0.93` → 0.07。
+   */
+  drag?: number;
+  /** 逐帧缩小（每 1/25 s 乘 `1-shrink`）；源码 `scale *= 0.9` → 0.1 */
+  shrink?: number;
+  /** 每 N 帧喷一颗尾迹粒子（源码 `rand()%10==0` 喷 0x4c5） */
+  trailEvery?: number;
+  /** 尾迹粒子的贴图（如 `Effect/Spark01.OZJ`） */
+  trailFile?: string;
+  /**
    * 是否在落点地面打一圈加色光斑（默认 true）。
    *
    * 源码 `MoveEffect` 里几乎每个 case 每帧都调 `AddTerrainLight(x, y, color, 2, …)`
@@ -181,6 +191,28 @@ export interface Effect {
   vel?: THREE.Vector3;
   /** Z 加速度（米/秒²）；undefined = 纯匀速（原行为） */
   gravity?: number;
+  /**
+   * 水平速度衰减（每 1/25 s 乘 `1-drag`）。
+   *
+   * 源码通用阶梯（`MoveEffect` LAB_004695b5 段）每帧
+   * `vel.x *= 0.93` / `vel.y *= 0.93` —— 弹体越飞越慢，落地前明显减速。
+   * 0.07 = 源码的 0.93。
+   */
+  drag?: number;
+  /**
+   * 逐帧缩小系数（每 1/25 s 乘 `shrink`）。
+   * 源码同段 `scale *= 0.9` —— 弹体接近落地时越来越小。
+   */
+  shrink?: number;
+  /**
+   * 尾迹：每 `trailEvery` 帧喷一颗 `trailFile` 粒子（源码 `rand()%10==0`
+   * 时 `Particle_Spawn(0x4c5)`）。飞行途中带一串火星/烟。
+   */
+  trailEvery?: number;
+  trailFile?: string;
+  trailAcc?: number;
+  /** 尾迹实际喷出次数（探针断言用） */
+  trailCount?: number;
   /** 地面光斑（AddTerrainLight 的近似）；null = 没有 */
   glow: THREE.Mesh | null;
   /** 落点高度：速度触到这个 Z 就停（陨石落地） */
@@ -322,6 +354,19 @@ function skinnedBox(meshes: THREE.SkinnedMesh[]): THREE.Box3 {
 export class EffectLayer {
   readonly active: Effect[] = [];
   private scene: THREE.Scene;
+  /**
+   * 尾迹喷发回调（由 main.ts 注入 spriteLayer）。
+   *
+   * 不直接 import SpriteLayer 是为了避免 effects ↔ sprites 互相依赖；
+   * 上层把「在某点放一颗粒子」的能力注入进来即可。
+   */
+  trailSpawner:
+    | ((
+        file: string,
+        pos: { x: number; y: number; z: number },
+        opt: Record<string, unknown>
+      ) => void)
+    | null = null;
 
   constructor(scene: THREE.Scene) {
     this.scene = scene;
@@ -451,6 +496,11 @@ export class EffectLayer {
           })()
         : undefined,
       gravity: opt.gravity,
+      drag: opt.drag ?? 0,
+      shrink: opt.shrink ?? 0,
+      trailEvery: opt.trailEvery ?? 0,
+      trailFile: opt.trailFile,
+      trailAcc: 0,
       glow: null,
       groundZ: pos.z + (opt.lift ?? 0),
       done: false,
@@ -521,19 +571,55 @@ export class EffectLayer {
 
       if (e.spin) e.root.rotation.z += e.spin * dt;
 
+      /*
+       * 逐帧缩小：源码通用阶梯同段 `scale *= 0.9` —— 弹体接近落地越来越小。
+       * 按 dt 折算成每 1/25 s 乘一次。
+       */
+      if (e.shrink) {
+        e.root.scale.multiplyScalar(Math.pow(1 - e.shrink, dt * 25));
+      }
+
       /* 速度推进（陨石下落 / 碎石抛物线）；触地就停在落点高度，剩下的寿命用来烧 */
       if (e.vel) {
         if (e.gravity) e.vel.z += e.gravity * dt;
+        /*
+         * 源码通用阶梯（`MoveEffect` LAB_004695b5）：每帧 `vel.x/y *= 0.93`
+         * —— **只衰减水平分量**，垂直由独立的 `grav` 累加驱动（加速下落）。
+         * 早先连 z 一起衰减，结果重力被抵消、陨石变成匀速下落。
+         */
+        if (e.drag) {
+          const d = Math.pow(1 - e.drag, dt * 25);
+          e.vel.x *= d;
+          e.vel.y *= d;
+        }
         e.root.position.addScaledVector(e.vel, dt);
         // 只有**正在下落**才算触地：往上抛的碎石刚生成时 z 就在地面附近
         if (e.vel.z <= 0 && e.root.position.z <= e.groundZ) {
           e.root.position.z = e.groundZ;
           e.vel = undefined;
         }
+        /*
+         * 尾迹：源码飞行途中 `rand()%10==0` 喷一颗 0x4c5 火星。
+         * 这里按累计时间折算成固定间隔（trailEvery 帧 @25fps）。
+         */
+        if (e.trailEvery && e.trailFile) {
+          e.trailAcc = (e.trailAcc ?? 0) + dt * 25;
+          if (e.trailAcc >= e.trailEvery) {
+            e.trailAcc -= e.trailEvery;
+            e.trailCount = (e.trailCount ?? 0) + 1;
+            const p = e.root.position;
+            this.trailSpawner?.(e.trailFile, { x: p.x, y: p.y, z: p.z }, {
+              size: 0.45,
+              life: 0.4,
+              vel: { x: (Math.random() - 0.5) * 0.8, y: (Math.random() - 0.5) * 0.8, z: 0.3 },
+              velJitter: 0.4,
+              gravity: -1.2,
+            });
+          }
+        }
       }
 
-      if (e.glow) {
-        // 光斑贴地跟随（火球飞过去时，地面那圈光也跟着走）
+      if (e.glow) {        // 光斑贴地跟随（火球飞过去时，地面那圈光也跟着走）
         e.glow.position.set(e.root.position.x, e.root.position.y, e.groundZ + 0.03);
         const gm = e.glow.material as THREE.MeshBasicMaterial;
         const lifeT = Math.min(1, e.age / Math.max(0.01, e.aliveFor));
@@ -613,6 +699,8 @@ export class EffectLayer {
        */
       at: [e.root.position.x, e.root.position.y, e.root.position.z].map(n => Number(n.toFixed(2))),
       scale: e.root.scale.x,
+      /** 尾迹喷出次数（探针断言「飞行途中真的在喷」） */
+      trailCount: e.trailCount ?? 0,
       /** 绕竖轴朝向（MU 世界角度，0 = +X）；用来断言「没多转 90°」 */
       yaw: Number(e.yaw.toFixed(4)),
       /** 落点地面光斑（近似 AddTerrainLight）是否在 */

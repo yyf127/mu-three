@@ -94,6 +94,12 @@ export interface FxPart {
   velJitter?: number;
   /** Z 加速度（米/秒²）：负 = 落石，正 = 从地里顶出来的火石 */
   gravity?: number;
+  /** 逐帧缩小（每 1/25 s 乘 `1-shrink`）—— 源码 `scale *= 0.9` */
+  shrink?: number;
+  /** 飞行途中每 N 帧喷一颗尾迹粒子（源码 `rand()%10==0` 喷 0x4c5） */
+  trailEvery?: number;
+  /** 尾迹粒子贴图（如 `Effect/Spark01.OZJ`） */
+  trailFile?: string;
   /** 追踪飞行时间（秒）；只有 `homing` 有意义，默认 0.32 */
   flyTime?: number;
   /**
@@ -807,6 +813,12 @@ function toPart(fx: SourceFx, isGround: boolean): FxPart | null {
       speed: def?.speed,
       drop: def?.drop,
       vel: def?.vel ? { ...def.vel } : undefined,
+      // 源码通用阶梯：垂直加速 / 减速 / 缩小 / 尾迹（MoveEffect LAB_004695b5）
+      gravity: def?.gravity,
+      drag: def?.drag,
+      shrink: def?.shrink,
+      trailEvery: def?.trailEvery,
+      trailFile: def?.trailFile,
       homing: fx.homing,
       note:
         `CreateEffect(${fx.type}${fx.sub ? `/${fx.sub}` : ''}) → ${model}` +
@@ -937,6 +949,16 @@ interface EffectDef {
   drop?: number;
   /** 速度（米/秒）；源码是「单位/帧」，×25/100 换算 */
   vel?: { x: number; y: number; z: number };
+  /** Z 加速度（米/秒²）：源码 `grav -= const` → 加速下落 */
+  gravity?: number;
+  /** 水平速度衰减（每 1/25 s 乘 1-drag）；源码 `vel.x/y *= 0.93` */
+  drag?: number;
+  /** 逐帧缩小（每 1/25 s 乘 1-shrink）；源码 `scale *= 0.9` */
+  shrink?: number;
+  /** 每 N 帧喷一颗尾迹粒子（源码 `rand()%10==0` 喷 0x4c5） */
+  trailEvery?: number;
+  /** 尾迹粒子贴图 */
+  trailFile?: string;
 }
 
 const EFFECT_DEF: Record<string, EffectDef> = {
@@ -949,7 +971,31 @@ const EFFECT_DEF: Record<string, EffectDef> = {
 
   /* 191 Fire01 —— 陨石 / 火球 */
   // case 0xBF, SubType 0：寿命 40 帧、[6] += 400（离地 4 m）、[0x32] = -50（-12.5 m/s）
-  '191/0': { life: 40, drop: 4, vel: { x: 0, y: 0, z: -12.5 } },
+  /*
+   * 源码通用阶梯（`MoveEffect` LAB_004695b5 段）逐帧做四件事，之前只做了第一件：
+   *   1. `pos.z += grav`        下落（已有：vel.z = -12.5）
+   *   2. `grav -= const`        垂直速度逐帧递减 → **加速下落**
+   *   3. `vel.x/y *= 0.93`      水平减速（drag 0.07）
+   *   4. `scale *= 0.9`         越来越小（shrink 0.1）
+   *   5. `rand()%10==0` → 喷 0x4c5 火星尾迹（每 10 帧一颗）
+   * 缺 2/3/4/5 时陨石看起来是「匀速直线的一块火」，很假。
+   */
+  '191/0': {
+    life: 40,
+    drop: 4,
+    vel: { x: 0, y: 0, z: -12.5 },
+    // 源码 `grav -= const`（_DAT_00552650 = 4.0 单位/帧² × 625/100 = 25 m/s²）
+    gravity: -25,
+    drag: 0.07, // 源码 vel.x/y *= 0.93（只衰减水平）
+    shrink: 0.1, // 源码 scale *= 0.9
+    /*
+     * 源码是 `if (rand()%10 == 0) Particle_Spawn(0x4c5)` —— 每帧 **10% 概率**，
+     * 不是「每 10 帧一次」。而陨石 4m 高 + 初速 12.5 + 重力 25 → 约 5 帧就落地，
+     * 所以取 `trailEvery: 1`（每帧都判）才可能有尾迹；概率感由 rand 本来就低。
+     */
+    trailEvery: 1,
+    trailFile: 'Effect/Spark02.OZJ',
+  },
   // SubType 1（火球）：寿命 60 帧、[6] += 120；它沿自己的角度飞（-Y），
   // 这里不套速度，改用 homing 的 flyTo，方向更准
   '191/1': { life: 60 },
