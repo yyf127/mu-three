@@ -365,6 +365,15 @@ export interface TerrainMesh {
   waterLevel: number;
   /** 这一格是不是水面（`layer1` 或 `layer2` 是 `TileWater01`） */
   isWaterCell(x: number, y: number): boolean;
+  /**
+   * 这一格的 `layer1` 瓦片索引 —— 对应源码的 `HeroTile`
+   * （`Player_InputTick.cpp:1899`：`HeroTile = TerrainMappingLayer1[idx]`）。
+   *
+   * 原版用它在洛兰判「站进了酒馆」（tile 125/126 → `HeroTile == 4`），
+   * 从而切 `Pub.mp3`；也是屋顶透明块（`MoveObjects`）的判据。
+   * 越界返回 -1。
+   */
+  tileIndexAt(x: number, y: number): number;
   /** 光照图的统计（诊断/调参用）：均值、分位数 */
   lightStats: { mean: number; p05: number; p50: number; p95: number };
   /** 这张图按均值定标得到的整体提亮系数（1 = 不动，>1 = 抬亮） */
@@ -825,6 +834,19 @@ export async function createTerrain(
   };
 
   /**
+   * 这一格的 `layer1` 瓦片索引（= 源码 `HeroTile`）。
+   *
+   * 索引公式与 `isWaterCell` 一致：`i = y * size + x`（`size` = 256）。
+   * 越界返回 -1，调用方自己判。
+   */
+  const tileIndexAt = (x: number, y: number) => {
+    const xi = Math.floor(x);
+    const yi = Math.floor(y);
+    if (xi < 0 || yi < 0 || xi >= size || yi >= size) return -1;
+    return data.layer1[yi * size + xi];
+  };
+
+  /**
    * 这一格水面的不透明度。
    *
    * `layer1` 是水 = 整格都是水（洛兰的河）→ 不透明。
@@ -1125,6 +1147,7 @@ export async function createTerrain(
     lightLift: uLightLift,
     waterLevel: WATER_LEVEL,
     isWaterCell,
+    tileIndexAt,
     water,
     updateWater,
     buildMinimap,

@@ -22,8 +22,26 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SRC = join(ROOT, '..', 'Mu-97k-Client-Source-main', 'src', 'Monster', 'Monster_Data.cpp');
+const GLOBALS = join(ROOT, '..', 'Mu-97k-Client-Source-main', 'src', 'globals.cpp');
 const SOUND_DIR = join(ROOT, 'dist', 'Data', 'Sound');
 const OUT = join(ROOT, 'src', 'data', 'monsterSounds.ts');
+
+/*
+ * 文件名常量表：`Monster_Data.cpp` 后半段（id 0x139 起）用的是
+ * `LoadWaveFile(0x14a, s_Data_Sound_mCursedKing1_wav_0055ce2c, ...)`，
+ * 文件名在 `globals.cpp` 的字符串常量里。以前只匹配字面量路径，
+ * 结果这批怪物（血怪/铁怪/杰坎/变种/诅咒之王/德拉克/幻影/雷纳/
+ * 巨型甲壳/莫尔特/凤凰/黑骷髅/红骷髅/奥克弓手等）**全部漏掉**，
+ * 对应的 wav 就成了「磁盘上有、代码没引用」的孤儿。
+ */
+const globalsText = readFileSync(GLOBALS, 'utf8');
+/** @type {Map<string,string>} */
+const constFile = new Map();
+for (const m of globalsText.matchAll(
+  /(s_Data_Sound_[A-Za-z0-9_]+)\[\]\s*=\s*"[^"]*?([^\\/"]+\.(?:wav|WAV|mp3))"/g
+)) {
+  constFile.set(m[1], m[2]);
+}
 
 const text = readFileSync(SRC, 'utf8');
 const lines = text.split(/\r?\n/);
@@ -49,6 +67,13 @@ for (const ln of lines) {
   const w = ln.match(/LoadWaveFile\([^,]+,\s*"([^"]+)"/);
   if (w) {
     files.push(w[1].split('\\').pop());
+    continue;
+  }
+  // 常量形式：`LoadWaveFile(0x14a, s_Data_Sound_mCursedKing1_wav_0055ce2c, ...)`
+  const cw = ln.match(/LoadWaveFile\([^,]+,\s*(s_Data_Sound_[A-Za-z0-9_]+)/);
+  if (cw) {
+    const f = constFile.get(cw[1]);
+    if (f) files.push(f);
     continue;
   }
   // 每个 case 块以 Model_SetAnimationSlots 收尾

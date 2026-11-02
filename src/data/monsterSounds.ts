@@ -7,7 +7,7 @@
  * `OpenMonsterModel`（按怪物 type 挂 5 条 `LoadWaveFile`）。
  *
  * 索引是**怪物 type**，也就是 `Monster.txt` 的 `Class`、视野包里的 `type`。
- * 覆盖 47 个 type（0..59）。
+ * 覆盖 60 个 type（0..62）。
  *
  * 原版这些音效**没有固定 id**（每次进图重新分配 120..419），所以表里存文件名，
  * 播放走 `sfxFile()`。
@@ -63,13 +63,26 @@ export const MONSTER_SOUNDS: Record<number, MonsterSoundSet> = {
   37: { idle: ['mHydra1.wav'], attack: ['mHydraAttack1.wav'], die: null },
   39: { idle: ['mDarkKnight1.wav', 'mDarkKnight2.wav'], attack: ['mDarkKnightAttack1.wav', 'mDarkKnightAttack2.wav'], die: 'mDarkKnightDie.wav' },
   40: { idle: ['mLizardKing1.wav', 'mLizardKing2.wav'], attack: [], die: 'mGorgonDie.wav' },
-  41: { idle: ['mBull1.wav', 'mBull2.wav'], attack: ['mBullAttack1.wav', 'mBullAttack2.wav'], die: 'mBullDie.wav' },
-  42: { idle: ['mBull1.wav', 'mBull2.wav'], attack: ['mBullAttack1.wav', 'mBullAttack2.wav'], die: 'mBullDie.wav' },
-  44: { idle: ['mBull1.wav', 'mBull2.wav'], attack: ['mBullAttack1.wav', 'mBullAttack2.wav'], die: 'mBullDie.wav' },
-  46: { idle: [], attack: [], die: 'mBullDie.wav' },
-  47: { idle: ['mHunter2.wav'], attack: [], die: 'mBullDie.wav' },
-  58: { idle: ['mHunter2.wav'], attack: [], die: null },
-  59: { idle: ['mHunter2.wav'], attack: [], die: null },
+  41: { idle: ['iron1.wav'], attack: ['iron_attack1.wav'], die: null },
+  42: { idle: ['jaikan1.wav', 'jaikan2.wav'], attack: ['jaikan_attack1.wav', 'jaikan_attack2.wav'], die: 'jaikan_die.wav' },
+  43: { idle: ['blood1.wav'], attack: ['blood_attack1.wav', 'blood_attack2.wav'], die: 'blood_die.wav' },
+  44: { idle: ['death1.wav'], attack: ['death_attack1.wav'], die: 'death_die.wav' },
+  45: { idle: ['mutant1.wav', 'mutant2.wav'], attack: ['mutant_attack1.wav'], die: null },
+  46: { idle: [], attack: ['mOrcArcherAttack1.wav'], die: 'mBullDie.wav' },
+  47: { idle: ['mHunter2.wav'], attack: ['mOrcCapAttack1.wav'], die: 'mBullDie.wav' },
+  48: { idle: ['mCursedKing1.wav', 'mCursedKing2.wav', 'mCursedKingDie1.wav'], attack: [], die: null },
+  49: { idle: ['mMolt1.wav'], attack: ['mMoltAttack1.wav'], die: 'mMoltDie.wav' },
+  50: { idle: [], attack: ['mAlquamosAttack1.wav'], die: 'mAlquamosDie.wav' },
+  51: { idle: ['mRainner1.wav'], attack: ['mRainnerAttack1.wav'], die: 'mRainnerDie.wav' },
+  52: { idle: ['mMegaCrust1.wav'], attack: ['mMegaCrustAttack1.wav'], die: 'mMegaCrustDie.wav' },
+  53: { idle: ['mPhantom1.wav'], attack: ['mPhantomAttack1.wav'], die: 'mPhantomDie.wav' },
+  54: { idle: ['mDrakan1.wav'], attack: ['mDrakanAttack1.wav'], die: 'mDrakanDie.wav' },
+  55: { idle: ['mPhoenix1.wav'], attack: ['mPhoenixAttack1.wav'], die: null },
+  56: { idle: ['mRedSkull.wav'], attack: ['mRedSkullAttack.wav'], die: 'mRedSkullDie.wav' },
+  57: { idle: ['mRedSkull.wav'], attack: ['mRedSkullAttack.wav'], die: 'mRedSkullDie.wav' },
+  58: { idle: ['mHunter2.wav'], attack: [], die: 'mGhaintOrgerDie.wav' },
+  59: { idle: ['mHunter2.wav'], attack: ['mBlackSkullAttack.wav'], die: 'mBlackSkullDie.wav' },
+  62: { idle: ['mMagicSkull.wav'], attack: [], die: null },
 };
 
 /** type → 音效集；没登记返回 null（客户端会用默认静音，不报错） */

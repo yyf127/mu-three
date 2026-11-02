@@ -269,7 +269,7 @@ import {
   toggleMuted,
   unlockAudio,
 } from './audio/sound';
-import { BGM_LOGIN, SKILL_SOUND } from './data/sounds';
+import { BGM_LOGIN, BGM_PUB, SKILL_SOUND } from './data/sounds';
 import { WeaponSlamLayer, WeaponWheelLayer } from './world/wheels';
 import { MONSTER_ACTION, PLAYER_SKIN_NPCS } from './world/monsterModels';
 import { SKILL_FX, loadSkills, type SkillEntry } from './data/skills';
@@ -1894,7 +1894,7 @@ function syncPubMusic() {
   const inside = world.objects.insideRoof();
   if (inside === pubBgmOn) return;
   pubBgmOn = inside;
-  if (inside) playBgm('Pub.mp3');
+  if (inside) playBgm(BGM_PUB);
   else setSceneAudio(world.mapId);
 }
 

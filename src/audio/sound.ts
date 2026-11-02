@@ -27,6 +27,7 @@ import {
   AMBIENT_BY_MAP,
   BGM_BY_MAP,
   BGM_LOGIN,
+  BGM_PUB,
   MUSIC_DIR,
   SOUND_BY_ID,
   SOUND_DIR,

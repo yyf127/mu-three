@@ -157,6 +157,12 @@ export const SOUNDS: SoundDef[] = [
   /* ── NPC（`NPC_ModelLoad.cpp`，按 NPC 类型加载到固定槽） ─────── */
   { id: 0x78, file: 'nBlackSmith.wav', channels: 1, pos3d: false, note: '铁匠' },
   { id: 0x79, file: 'nMix.wav', channels: 1, pos3d: false, note: '合成机' },
+  /*
+   * `nHarp.wav` 在源码里也是 **id 0x78**（`NPC_ModelLoad.cpp:87`），
+   * 与铁匠共用槽位 —— 原版按 NPC 类型决定装哪个文件，id 不唯一。
+   * 之前只抄了 nBlackSmith，nHarp 就成了「磁盘有、代码没引用」的孤儿。
+   */
+  { id: 0x78, file: 'nHarp.wav', channels: 1, pos3d: false, note: '竖琴 NPC（与铁匠共用 0x78）' },
 
   /*
    * ── 界面音效（另一张表：`Scene/Scene_AssetLoad.cpp:159-166`）─────
@@ -222,6 +228,14 @@ export const BGM_BY_MAP: Record<number, string> = {
   3: 'Noria.mp3',
   5: 'Dungeon.mp3',
 };
+
+/**
+ * 洛兰**酒馆**内播放的 BGM（`g_lpszMp3[0]` = `Pub.mp3`）。
+ *
+ * 源码 `globals.cpp:365` 注释写明第 0 槽是「taberna de Lorencia (`HeroTile == 4`)」
+ * —— 站在酒馆那几格上时换成 Pub.mp3。之前表里只有地图级 BGM，这一首成了孤儿。
+ */
+export const BGM_PUB = 'Pub.mp3';
 
 /** 登录界面/选角：原版 `SceneFlag == 2` 放的就是 MuTheme（= Lorencia.mp3） */
 export const BGM_LOGIN = 'Lorencia.mp3';
