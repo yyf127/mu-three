@@ -234,6 +234,7 @@ import { NpcDialog } from './ui/npcDialog';
 import { HelpWindow } from './ui/helpWindow';
 import { SandboxPanel, type SandboxState } from './ui/sandbox';
 import { MoveCommandPanel } from './ui/moveCommand';
+import { CommandMenuPanel } from './ui/commandMenu';
 import { NpcPanel } from './ui/npcPanel';
 import { EventTimerPanel } from './ui/eventTimer';
 import { PromptDialog } from './ui/dialog';
@@ -1141,8 +1142,22 @@ minimap.onMove = () => {
   if (!player || !world) return;
   refreshMovePanel();
   movePanel.show();
+  commandMenu.hide(); // 与 F 的命令菜单互斥
 };
 movePanel.onWarp = entry => void warpTo(entry);
+
+/*
+ * 命令菜单（F 键）。把 `Command.txt` 里非 GM 的 17 条普通命令做成分类快捷面板。
+ *
+ * 它是**纯快捷输入**：点一条 = 帮你在聊天框里发那条指令，和手打完全等价，
+ * 服务端行为一点不变。所以等级/金币门槛不由这里判（服务端自己判），
+ * 本地只管「无参直发 / 有参弹输入框」。
+ */
+const commandMenu = new CommandMenuPanel(uiLayer);
+commandMenu.callbacks = {
+  send: text => sendChatText(text),
+  notice: text => chatBox.notice(text),
+};
 
 /**
  * NPC 货架 / 仓库（点 NPC 打开）。
@@ -5526,23 +5541,52 @@ function playLevelUpFx() {
 /**
  * `0xF3/06` 加点回执 —— `GAMESERVER_EXTRA=1` 时带完整四维，直接覆盖本地值。
  *
- * 结构（`Protocol.h:467`，按 4 字节对齐，共 44 字节）：
+ * 结构（服务端 `Protocol.h:467` `PMSG_LEVEL_UP_POINT_SEND`）：
  *
- *   4   result        = 16 + type（0力 1敏 2体 3能），0 = 失败
- *   8   MaxLifeAndMana (u16)  ← 只在 type 2/3 赋值，其他情况是未初始化的栈垃圾
- *   10  MaxBP (u16)
- *   12  ViewPoint (u32)
- *   16  ViewMaxHP  20 ViewMaxMP  24 ViewMaxBP
- *   28  ViewStrength  32 ViewDexterity  36 ViewVitality  40 ViewEnergy
+ * ```c
+ * struct PMSG_LEVEL_UP_POINT_SEND {
+ *   PSBMSG_HEAD header;    // C1:F3:06 —— **4 字节**（type/size/head/subh）
+ *   BYTE  result;
+ *   WORD  MaxLifeAndMana;
+ *   WORD  MaxBP;
+ * #if(GAMESERVER_EXTRA==1)
+ *   DWORD ViewPoint, ViewMaxHP, ViewMaxMP, ViewMaxBP;
+ *   DWORD ViewStrength, ViewDexterity, ViewVitality, ViewEnergy;
+ * #endif
+ * };
+ * ```
  *
- * 实测：`c1 2c f3 06 10 …` + 12 起的 8 个 DWORD = 42/128/24/26/31/20/25/10，
- * 正好对上加点后的点数（45-3）和四维。所以不需要再拉 `0xF3/03` ——
- * 那个请求在游戏里根本不回包，之前加点后“没反应”就是卡在那儿超时。
+ * ⚠️ **这个结构体不在 `#pragma pack(1)` 区间内**（`Protocol.h` 的 pack 段是
+ * 80-87 / 136-144 / 516-524，它在 467 行），走 MSVC 默认 4 字节对齐。
+ * `PSBMSG_HEAD` 本身是 4 字节（`ProtocolDefines.h:39`：type/size/head/subh），
+ * 之后 `result`(BYTE) 补 1 洞、`MaxBP`(WORD) 补 2 洞：
+ *
+ * ```
+ *   0..3  PSBMSG_HEAD (4B: C1 / size / F3 / 06)
+ *   4     result (BYTE)          ← 后随 1 字节对齐洞
+ *   5..6  (洞 + MaxLifeAndMana 低字节)
+ *   6..7  MaxLifeAndMana (u16)
+ *   8..9  MaxBP         (u16)    ← 后随 2 字节对齐洞
+ *   12..15 ViewPoint   (u32)
+ *   16..19 ViewMaxHP
+ *   20..23 ViewMaxMP
+ *   24..27 ViewMaxBP
+ *   28..31 ViewStrength
+ *   32..35 ViewDexterity
+ *   36..39 ViewVitality
+ *   40..43 ViewEnergy
+ * ```
+ *
+ * **总长 44 字节**（最大成员 4 字节对齐，44 = 4×11）。
+ *
+ * `MaxLifeAndMana` 只在 `type == 2/3` 时被服务端赋值（其余情况是栈垃圾），
+ * 所以血蓝上限一律以 `ViewMaxHP/MP` 为准，不用那个 WORD。
  */
 function applyAddPointReply(pkt: Uint8Array) {
   const u32 = (o: number) =>
     (pkt[o] | (pkt[o + 1] << 8) | (pkt[o + 2] << 16) | (pkt[o + 3] << 24)) >>> 0;
   const info = currentChar?.info;
+  // 短包（无 GAMESERVER_EXTRA，只有 8 字节）没有四维可读 —— 忽略
   if (!info || pkt.length < 44) return;
 
   const result = pkt[4];
@@ -11243,6 +11287,13 @@ window.addEventListener('keydown', e => {
   }
 
   /*
+   * 命令菜单（F 键）开着时，所有按键交给它自己处理
+   * （↑↓ 选行、←→ 切分类、Enter 执行、Esc/F 关闭；填参数时交给输入框）。
+   * 同样必须在下面「Enter 开聊天」之前，否则 Enter 会被聊天框抢走。
+   */
+  if (commandMenu.isOpen && commandMenu.handleKey(e)) return;
+
+  /*
    * 选角界面的 ESC（原版没有 → 网页端补的出口）。
    *
    * 只给三个选项：返回线路选择 / 选项 / 取消。这里同时要处理
@@ -11341,6 +11392,16 @@ window.addEventListener('keydown', e => {
     e.preventDefault();
     refreshMovePanel();
     movePanel.show();
+    // 移动窗与命令菜单互斥：开一个就收掉另一个（两者占同一块地方）
+    commandMenu.hide();
+    return;
+  }
+
+  // F = 命令菜单（把 Command.txt 非 GM 命令做成快捷面板；同样是网页端补的）
+  if (e.code === 'KeyF' && player && world) {
+    e.preventDefault();
+    commandMenu.show();
+    movePanel.hide();
     return;
   }
 
@@ -12170,6 +12231,47 @@ function boot() {
     loadMap: (mapId: number, x = 128, y = 128) => loadWorld(mapId, x, y, { offline: true }),
     /** 调试：移动命令窗口的当前列表（谁能走 / 为什么不能走） */
     moveCommand: () => movePanel.snapshot(),
+    /** 探针：开 / 关移动命令窗口（不传 = 切换），返回打开后是否可见 */
+    moveToggle: (open?: boolean) => {
+      if (typeof open === 'boolean') {
+        if (open) movePanel.show();
+        else movePanel.hide();
+      } else {
+        movePanel.toggle();
+      }
+      return movePanel.isOpen;
+    },
+    /** 调试：命令菜单（F 键）的分类与命令表 */
+    commandMenu: () => commandMenu.snapshot(),
+    /** 探针：开 / 关命令菜单 */
+    commandMenuToggle: (open?: boolean) => {
+      if (typeof open === 'boolean') {
+        if (open) commandMenu.show();
+        else commandMenu.hide();
+      } else {
+        commandMenu.toggle();
+      }
+      return commandMenu.isOpen;
+    },
+    /*
+     * 命令菜单（单页版）探针口。
+     *
+     * 旧版有「分类页签」和「弹框填参数」，所以有 category/fill/plus 三个口；
+     * 现在所有命令都在一页、控件直接嵌在行里，统一走 `debugRun(cmd, values)`：
+     * 按命令名找到行 → 写入控件值 → 点 [Accept] 按钮。
+     */
+    /** 探针：选中第 i 行 */
+    commandMenuRow: (i: number) => commandMenu.debugSelectRow(i),
+    /** 探针：执行指定命令（`values` 按参数顺序给） */
+    commandMenuRun2: (cmd: string, values: string[] = []) => commandMenu.debugRun(cmd, values),
+    /** 探针：读某行的下拉选项 */
+    commandMenuOptions: (cmd: string) => commandMenu.debugOptions(cmd),
+    /** 探针：展开某行的下拉弹层 */
+    commandMenuOpenDropdown: (cmd: string) => commandMenu.debugOpenDropdown(cmd),
+    /** 探针：下拉弹层里的选项文本 */
+    commandMenuDropdownItems: () => commandMenu.debugDropdownItems(),
+    /** 探针：选下拉里的第 i 项 */
+    commandMenuPickDropdown: (i: number) => commandMenu.debugPickDropdown(i),
     /** 探针：选中移动表的第 i 条（等价于 ↑↓ 走到那一行） */
     moveSelect: (i: number) => {
       movePanel.select(i);
@@ -15298,6 +15400,31 @@ function boot() {
       heads: recentHeads.slice(-40),
       remoteDebug: remotes.debug,
     }),
+    /** 角色四维 + 可分配点（加点回执的落点，探针断言用） */
+    charInfo: () => ({
+      level: currentChar?.level ?? 0,
+      levelUpPoint: currentChar?.info?.levelUpPoint ?? 0,
+      strength: currentChar?.info?.strength ?? 0,
+      dexterity: currentChar?.info?.dexterity ?? 0,
+      vitality: currentChar?.info?.vitality ?? 0,
+      energy: currentChar?.info?.energy ?? 0,
+      maxLife: currentChar?.info?.maxLife ?? 0,
+      maxMana: currentChar?.info?.maxMana ?? 0,
+      maxBp: currentChar?.info?.maxBp ?? 0,
+      money: currentChar?.info?.money ?? 0,
+    }),
+    /**
+     * 探针：把一段原始下行包喂给同一个处理器（跳过 socket）。
+     *
+     * 只走 `applyAddPointReply` 这条已实现的解析路径 —— 用来验字段偏移，
+     * 不模拟完整 session。非法包（长度不足/opcode 不符）会被解析函数自己挡掉。
+     */
+    debugFeedPacket: (bytes: number[]) => {
+      const pkt = Uint8Array.from(bytes);
+      const hs = pkt[0] === 0xc2 || pkt[0] === 0xc4 ? 3 : 2;
+      if (pkt[hs] === 0xf3 && pkt[hs + 1] === 0x06) applyAddPointReply(pkt);
+      return true;
+    },
   };
 }
 

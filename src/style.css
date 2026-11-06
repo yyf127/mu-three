@@ -1851,6 +1851,17 @@ button.small {
    0.97 客户端没有这个窗口，版式按后期版本补：四列（纷争/地图/等级/金币）
    + 移动/关闭。坐标在 UiLayer 的 640×480 逻辑坐标里，跟着舞台缩放，
    所以这里全用逻辑像素（不要改成 px 自适应的写法）。
+
+   底板照 Win 端物件窗那套：
+     RenderInventoryInterface  HUD_Pass6.cpp:216
+       Item_Back01 (260) @ (  0,   0) 190×256
+       Item_Back02 (261) @ (  0, 256) 190×177    拼成 190×433
+   两块贴图由 moveCommand.ts 的 buildPlates() 插进来（.mv-sprite）。
+
+   字体/配色照原版：
+     标题   g_hFontBold（CreateFontA 700 粗体，NONANTIALIASED）
+     正文   g_hFont（400）
+     字色   AdaptiveText 那套硬阴影：1px 黑色投影 + 主色
    ================================================================ */
 
 .mv-panel {
@@ -1859,51 +1870,72 @@ button.small {
   z-index: 11;
   display: flex;
   flex-direction: column;
-  padding: 3px;
+  /* 底板贴图是绝对定位的，内容靠 padding 让开边框 */
+  padding: 6px 10px 4px;
   font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
-  color: #e6d8b6;
-  background:
-    linear-gradient(180deg, rgba(96, 74, 36, 0.22) 0%, rgba(0, 0, 0, 0) 38%),
-    linear-gradient(180deg, #2b2418 0%, #16120b 100%);
-  border: 1px solid #8d7a45;
-  box-shadow:
-    0 0 0 1px #0a0805,
-    inset 0 0 18px rgba(0, 0, 0, 0.65),
-    0 6px 16px rgba(0, 0, 0, 0.55);
+  color: #dcdcdc;
+  /* 兜底底色：贴图没载进来时也能看清内容 */
+  background: linear-gradient(180deg, #2b2418 0%, #16120b 100%);
+  border: 1px solid #6d5c33;
+  box-shadow: 0 0 0 1px #0a0805;
   user-select: none;
+}
+
+/* 贴图到位后撤掉兜底边框，让底板自己当边框 */
+.mv-panel.mv-textured {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
 }
 
 .mv-panel.hidden {
   display: none;
 }
 
-.mv-title {
-  height: 18px;
-  line-height: 18px;
-  text-align: center;
-  font-size: 12px;
-  letter-spacing: 3px;
-  color: #ffe9a8;
-  background: linear-gradient(180deg, #4b3a1c 0%, #2c2313 100%);
-  border-bottom: 1px solid #6b5827;
-  text-shadow: 1px 1px 0 #000;
+/* 底板贴图：绝对定位，原版显示尺寸就是它自己的尺寸 */
+.mv-sprite {
+  position: absolute;
+  pointer-events: none;
+  image-rendering: pixelated;
+  z-index: 0;
 }
 
-/* 四列：纷争 40 / 地图名 88 / 等级 44 / 金币 56 = 228（面板内宽） */
+/* 标题：原版 RenderText(..., g_hFontBold)，白字 + 硬阴影 */
+.mv-title {
+  position: relative;
+  z-index: 2;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  font-size: 12px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  color: #dcdcdc;
+  text-shadow: 1px 1px 0 #000;
+  /* 底板上方那块最亮，标题压在它上面 */
+  margin: 6px 0 4px;
+}
+
+/* 四列：纷争 20 / 地图名 70 / 等级 30 / 金币 40 = 186（面板内宽 190-7*2+…） */
 .mv-head,
 .mv-row {
+  position: relative;
+  z-index: 2;
   display: grid;
-  grid-template-columns: 40px 88px 44px 56px;
+  grid-template-columns: 25px 65px 30px 38px;
   align-items: center;
   column-gap: 0;
 }
 
+/* 表头：原版窗口里的分栏字比正文亮一档（GlobalText[223] 那类黄） */
 .mv-head {
   height: 14px;
   padding: 2px 0;
-  font-size: 11px;
-  color: #ffc23c;
-  border-bottom: 1px solid #4a3d20;
+  font-size: 10px;
+  font-weight: bold;
+  color: #ffdc96;
+  border-bottom: 1px solid rgba(140, 116, 60, 0.55);
+  text-shadow: 1px 1px 0 #000;
 }
 
 .mv-head span:nth-child(n + 3) {
@@ -1914,11 +1946,14 @@ button.small {
 .mv-list {
   /* position: relative 让 .mv-row 的 offsetTop 相对自己算（键盘选中时滚动用） */
   position: relative;
+  z-index: 2;
   /*
-   * 服务端 Move.txt 目前 23 条（足球场 + 4 张图的各层），一屏放不下 ——
-   * 12 行可视 + 细滚动条。行高 16px，所以 12*16 = 192。
+   * 底板总高 433，扣掉标题(26) + 表头(18) + 提示(16) + 按钮区(31) ≈ 91，
+   * 列表能占 340 左右；一行 16px → 一屏 21 行。服务端 Move.txt 目前 23 条，
+   * 差一点点，留个细滚动条。
    */
-  max-height: 192px;
+  flex: 1 1 auto;
+  max-height: 340px;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: thin;
@@ -1948,20 +1983,21 @@ button.small {
   font-size: 11px;
   line-height: 16px;
   cursor: pointer;
-  color: #d9cba6;
+  color: #dcdcdc;
+  text-shadow: 1px 1px 0 #000;
 }
 
 .mv-row:nth-child(odd) {
-  background: rgba(255, 255, 255, 0.022);
+  background: rgba(255, 240, 190, 0.05);
 }
 
 .mv-row:hover {
-  background: rgba(255, 240, 190, 0.09);
+  background: rgba(255, 240, 190, 0.12);
 }
 
 .mv-row.sel {
-  background: rgba(196, 158, 74, 0.22);
-  outline: 1px solid #a3874a;
+  background: rgba(196, 158, 74, 0.3);
+  outline: 1px solid #c9a95c;
   outline-offset: -1px;
   color: #fff2c8;
 }
@@ -1970,12 +2006,12 @@ button.small {
 .mv-row.locked,
 .mv-row.locked .mv-conflict {
   color: #d0453a;
-  text-shadow: 0 0 4px rgba(160, 20, 10, 0.35);
+  text-shadow: 1px 1px 0 #000;
 }
 
 .mv-row.locked.sel {
   color: #ff6a5c;
-  background: rgba(120, 26, 18, 0.28);
+  background: rgba(120, 26, 18, 0.35);
   outline-color: #8f3a2c;
 }
 
@@ -1997,6 +2033,8 @@ button.small {
 
 /* 原因提示：只有选到走不通的条目时才占一行 */
 .mv-hint {
+  position: relative;
+  z-index: 2;
   height: 0;
   overflow: hidden;
   font-size: 11px;
@@ -2013,20 +2051,23 @@ button.small {
 }
 
 .mv-btns {
+  position: relative;
+  z-index: 2;
   display: flex;
   justify-content: center;
-  gap: 18px;
-  padding: 6px 0 3px;
-  border-top: 1px solid #3d3219;
+  gap: 16px;
+  padding: 6px 0 2px;
+  border-top: 1px solid rgba(140, 116, 60, 0.5);
   margin-top: 2px;
 }
 
 .mv-btn {
-  min-width: 62px;
+  min-width: 58px;
   height: 20px;
   padding: 0 10px;
   font-family: inherit;
   font-size: 12px;
+  font-weight: bold;
   letter-spacing: 1px;
   color: #f0e0b4;
   background: linear-gradient(180deg, #4a3b1e 0%, #241b0e 100%);
@@ -2045,6 +2086,60 @@ button.small {
   transform: translateY(1px);
 }
 
+/*
+ * 图标版按钮（`Ok.ozj` 70×21 / 悬停 `Ok2.ozj`）。
+ *
+ * 素材自带「OK」字样和立体边框，所以要把按钮自己的底色/边框都去掉，
+ * 否则会出现「按钮框里套一个按钮图」的双层边框。
+ */
+.mv-btn-icon {
+  min-width: 0;
+  width: 70px;
+  height: 21px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  line-height: 0;
+}
+
+.mv-btn-icon:hover {
+  border: none;
+  filter: brightness(1.1);
+}
+
+.mv-btn-icon img {
+  display: block;
+  width: 70px;
+  height: 21px;
+  image-rendering: pixelated;
+}
+
+/*
+ * 右上角关闭按钮（背包 / 移动命令 / 命令菜单共用）。
+ *
+ * 位置与尺寸和 `.inv-close` 完全一致（161,4 / 24×24），
+ * 三个面板的关闭按钮视觉与手感统一。
+ */
+.mv-close,
+.cm-close {
+  position: absolute;
+  left: 161px;
+  top: 4px;
+  width: 24px;
+  height: 24px;
+  z-index: 4;
+  cursor: pointer;
+  image-rendering: pixelated;
+  opacity: 0.92;
+}
+
+.mv-close:hover,
+.cm-close:hover {
+  opacity: 1;
+  filter: brightness(1.15);
+}
+
 /* 走不通时按「移动」：抖一下，比只弹提示更容易注意到 */
 @keyframes mv-shake {
   0%, 100% { transform: translateX(0); }
@@ -2054,6 +2149,364 @@ button.small {
 
 .mv-row.shake {
   animation: mv-shake 0.22s ease;
+}
+
+/* ================================================================
+   命令菜单（F 键，src/ui/commandMenu.ts）
+   ----------------------------------------------------------------
+   0.97 客户端没有这个窗口。把 `Command.txt` 里**非 GM** 的 16 条普通命令
+   做成一页式快捷面板 —— 点 [Accept] = 帮你在聊天框里发那条指令，与手打等价。
+
+   单页竖排：分类小标题 + 全部命令，超出面板就滚动（不再用页签切分类）。
+   每行 = `名称 | 控件 | [Accept]`，控件形态由参数决定：
+     数字 → 输入框；enum → 自绘下拉；文本 → 输入框；无参 → 只有按钮。
+
+   底板与移动窗口同一套（Item_Back01 190×256 + Item_Back02 190×177）；
+   配色 / 字体沿用原版：宋体、硬阴影、点名表黄 #ffdc96。
+   行高统一 24px，[Accept] 图标也是 24×24。
+   ================================================================ */
+
+.cm-panel {
+  position: absolute;
+  pointer-events: auto;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  padding: 6px 7px 4px;
+  font-family: 'SimSun', '宋体', 'Microsoft YaHei', serif;
+  color: #dcdcdc;
+  /* 兜底底色（贴图没载进来时也看得清） */
+  background: linear-gradient(180deg, #2b2418 0%, #16120b 100%);
+  border: 1px solid #6d5c33;
+  box-shadow: 0 0 0 1px #0a0805;
+  user-select: none;
+}
+
+.cm-panel.cm-textured {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.cm-panel.hidden {
+  display: none;
+}
+
+/* 底板贴图 */
+.cm-sprite {
+  position: absolute;
+  pointer-events: none;
+  image-rendering: pixelated;
+  z-index: 0;
+}
+
+.cm-title {
+  position: relative;
+  z-index: 2;
+  height: 14px;
+  line-height: 14px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 2px;
+  color: #dcdcdc;
+  text-shadow: 1px 1px 0 #000;
+  margin: 2px 0 2px;
+}
+
+/* 列表：一页放全部命令，放不下就滚动 */
+.cm-list {
+  position: relative;
+  z-index: 2;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #a3874a rgba(0, 0, 0, 0.35);
+}
+
+.cm-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.cm-list::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.35);
+}
+
+.cm-list::-webkit-scrollbar-thumb {
+  background: #a3874a;
+  border-radius: 2px;
+}
+
+.cm-list::-webkit-scrollbar-thumb:hover {
+  background: #c9a95c;
+}
+
+/* 分类小标题：跨整行，左对齐 + 一条细分隔线 */
+.cm-group {
+  height: 12px;
+  line-height: 12px;
+  padding: 0 3px;
+  margin-top: 0;
+  font-size: 10px;
+  font-weight: bold;
+  color: #ffdc96;
+  text-shadow: 1px 1px 0 #000;
+  border-bottom: 1px solid rgba(140, 116, 60, 0.5);
+}
+
+.cm-group:first-child {
+  margin-top: 0;
+}
+
+/*
+ * 命令行：`名称 58px | 控件区 1fr | [Accept] 18px`，行高 20px。
+ *
+ * 高度账（面板 433 总高）：
+ *   padding 6+4=10 + title 14+4=18 + foot 10+4=14 → 列表可得 ≈ 391
+ *   16 行 × 20 + 5 个分类标题 × 14 = 390 ≤ 391  → **一屏放下，不滚动**
+ *
+ * 控件区是**一格 flex 容器**（`.cm-ctrl`），不是把每个控件直接塞进网格 ——
+ * `/reset` 有 5 个控件，塞进 3 列网格会换行到第二网格行，
+ * 把 `[Accept]` 挤回第一列和文字重叠。
+ */
+.cm-row {
+  display: grid;
+  grid-template-columns: 58px 1fr 18px;
+  align-items: center;
+  column-gap: 4px;
+  height: 20px;
+  padding: 0 3px;
+  font-size: 11px;
+  line-height: 20px;
+  cursor: pointer;
+  color: #dcdcdc;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.cm-row:hover {
+  background: rgba(255, 240, 190, 0.12);
+}
+
+.cm-row.sel {
+  background: rgba(196, 158, 74, 0.3);
+  outline: 1px solid #c9a95c;
+  outline-offset: -1px;
+  color: #fff2c8;
+}
+
+.cm-cmd {
+  overflow: hidden;
+  white-space: nowrap;
+  font-weight: bold;
+}
+
+/* 控件区：flex 横排，几个参数就几个控件，自动等分可用宽度 */
+.cm-ctrl {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 3px;
+  height: 20px;
+  overflow: hidden;
+}
+
+.cm-ctrl-few > * {
+  flex: 1 1 0;
+}
+
+/* 多参数行（/reset 5 个）：下拉固定窄一点，数字框等分剩下的 */
+.cm-ctrl-many > .cm-select {
+  flex: 0 0 32px;
+}
+
+/* 多参数行的每个数字框带个小标签（力量/敏捷/…），竖排 */
+.cm-ctrl-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.cm-ctrl-tag {
+  font-size: 8px;
+  line-height: 8px;
+  color: #9c8f70;
+  text-align: center;
+  text-shadow: 1px 1px 0 #000;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 多参数行的输入框压矮到 12px（上面还有 8px 标签） */
+.cm-ctrl-cell .cm-inline-input {
+  height: 12px;
+  line-height: 12px;
+  padding: 0 2px;
+  font-size: 10px;
+}
+
+/* 单参数行的输入框（20px 行里留 2px 边距 → 16px） */
+.cm-inline-input {
+  min-width: 0;
+  width: 100%;
+  height: 16px;
+  padding: 0 3px;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 16px;
+  color: #f0e0b4;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid #6d5c33;
+  border-radius: 2px;
+  outline: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cm-inline-input:focus {
+  border-color: #d6b96a;
+  box-shadow: 0 0 0 1px rgba(214, 185, 106, 0.3);
+}
+
+.cm-inline-input::placeholder {
+  color: #7a6e54;
+  text-align: left;
+}
+
+/* ─── 自绘下拉 ─────────────────────────────────────────────────── */
+
+.cm-select {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  width: 100%;
+  height: 16px;
+  padding: 0 3px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #f0e0b4;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid #6d5c33;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.cm-select:hover,
+.cm-select.open {
+  border-color: #d6b96a;
+}
+
+.cm-select-value {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.cm-select-caret {
+  flex: 0 0 auto;
+  margin-left: 3px;
+  font-size: 9px;
+  color: #c9a95c;
+}
+
+/* 弹层：挂在面板上（绝对定位），否则会被 .cm-list 的 overflow 裁掉 */
+.cm-select-menu {
+  position: absolute;
+  z-index: 20;
+  min-width: 60px;
+  padding: 2px;
+  font-family: inherit;
+  font-size: 11px;
+  color: #dcdcdc;
+  background: linear-gradient(180deg, #3a3020 0%, #1d1710 100%);
+  border: 1px solid #8d7a45;
+  border-radius: 2px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.7);
+}
+
+.cm-select-item {
+  height: 18px;
+  line-height: 18px;
+  padding: 0 6px;
+  cursor: pointer;
+  text-shadow: 1px 1px 0 #000;
+}
+
+.cm-select-item:hover {
+  background: rgba(196, 158, 74, 0.3);
+  color: #fff2c8;
+}
+
+.cm-select-item.on {
+  color: #ffdc96;
+  font-weight: bold;
+}
+
+/* [Accept] 按钮：24×24 图标（原版素材尺寸），行高 22px 时允许上下溢出居中 */
+/*
+ * [Accept] 按钮：18×18，跟行高 20px 同步缩（原来 24×24 会显得突出）。
+ * 图标素材原生 24×24，靠 `img { width/height: 100% }` 缩放下来。
+ */
+.cm-inline-plus {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: bold;
+  line-height: 1;
+  color: #ffdc96;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-shadow: 1px 1px 0 #000;
+}
+
+/*
+ * 图标：素材原生 24×24，显示时缩到 18×18（和按钮同尺寸）。
+ *
+ * ⚠️ 别用 `width/height: 100%` —— flex 子项的 `min-width/min-height: auto`
+ * 会按素材原始尺寸撑开，实测撑成 25×25（24 + 1px 边框）。
+ * 直接写死像素值最稳。
+ */
+.cm-inline-plus img {
+  display: block;
+  width: 18px;
+  height: 18px;
+  min-width: 0;
+  min-height: 0;
+  image-rendering: pixelated;
+}
+
+.cm-inline-plus:hover {
+  filter: brightness(1.25);
+}
+
+.cm-inline-plus:active {
+  transform: translateY(1px);
+}
+
+/* 底部操作提示 */
+.cm-foot {
+  position: relative;
+  z-index: 2;
+  padding: 2px 2px 0;
+  font-size: 9px;
+  line-height: 10px;
+  color: #8a7e62;
+  text-align: center;
+  text-shadow: 1px 1px 0 #000;
+  border-top: 1px solid rgba(140, 116, 60, 0.5);
+  margin-top: 2px;
 }
 
 /* ================================================================
