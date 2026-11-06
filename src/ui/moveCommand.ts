@@ -17,12 +17,33 @@
  * 不用舞台像素，否则窗口大小会跟随窗口尺寸漂移。
  */
 import { UiLayer } from './frame';
+import { uiSprite, preloadUi } from './ozj';
 import { warpTable, type WarpEntry } from '../world/warp';
 
-/** 面板位置（640×480 逻辑坐标） */
-const PANEL_X = 202;
-const PANEL_Y = 72;
-const PANEL_W = 236;
+/*
+ * 面板尺寸 / 定位：照 Win 端背包、商店那套底板 ——
+ *
+ *   RenderInventoryInterface  HUD_Pass6.cpp:216
+ *     GL_DrawTexture(260, X, Y,       190, 256, …)   Item_Back01
+ *     GL_DrawTexture(261, X, Y + 256, 190, 177, …)   Item_Back02
+ *
+ * 两块底板拼成 190×433，这是 0.97 所有物件窗的统一骨架（`Item_back01.ozj`
+ * 原始像素只有 83×112、`Item_Back02.OZJ` 112×104，但原版就是把它当 190 宽
+ * 拉伸画的，所以这里也照原版的显示尺寸来，不按原始像素）。
+ *
+ * 原版这两个窗体都贴右边（原点 260），移动窗放**左侧**（原点 32），
+ * 免得和背包/商店抢位置。
+ */
+const PANEL_X = 0;
+const PANEL_Y = 0;
+const PANEL_W = 190;
+const TOP_H = 256;
+const BOT_H = 177;
+/** 底板拼起来的总高 */
+const PANEL_H = TOP_H + BOT_H;
+
+/** 需要预载的底板贴图（名字用 ozj.ts 的缓存键，忽略大小写与扩展名） */
+const SPRITES = ['Item_back01', 'Item_Back02'];
 
 export interface MoveCommandStatus {
   /** 角色等级；0 = 未知（离线演示没有角色卡，按「不限制」处理） */
@@ -56,10 +77,17 @@ export class MoveCommandPanel {
     this.el.style.left = `${PANEL_X}px`;
     this.el.style.top = `${PANEL_Y}px`;
     this.el.style.width = `${PANEL_W}px`;
+    this.el.style.height = `${PANEL_H}px`;
     // 面板上的点击不要漏给 3D 画面（点地板会走位）
     for (const type of ['pointerdown', 'mousedown', 'click', 'dblclick', 'wheel'] as const) {
       this.el.addEventListener(type, e => e.stopPropagation());
     }
+
+    /*
+     * 底板贴图：z-index 0，后于内容 append 也没关系（内容都在 z-index ≥ 1）。
+     * 异步载入，失败时面板退回纯色兜底（CSS 里留了底色），不影响可用性。
+     */
+    void this.buildPlates();
 
     const title = document.createElement('div');
     title.className = 'mv-title';
@@ -85,8 +113,11 @@ export class MoveCommandPanel {
 
     const btns = document.createElement('div');
     btns.className = 'mv-btns';
-    btns.append(this.button('移 动', () => this.confirm()), this.button('关 闭', () => this.hide()));
+    btns.append(this.button('移 动', () => this.confirm(), ['Ok', 'Ok2']));
     this.el.appendChild(btns);
+
+    // 右上角关闭按钮（与背包/命令菜单同一套 `exit_01/02`；原版靠底栏 M 再按一次）
+    void this.buildCloseButton();
 
     ui.add(this.el);
 
@@ -95,13 +126,89 @@ export class MoveCommandPanel {
     this.rebuild();
   }
 
-  private button(text: string, onClick: () => void) {
+  /**
+   * 底板 = `Item_Back01`(190×256) + `Item_Back02`(190×177) 首尾相接。
+   * 与 `RenderInventoryInterface` 完全一致（HUD_Pass6.cpp:220-221）。
+   */
+  private async buildPlates() {
+    try {
+      await preloadUi(SPRITES);
+      const [top, bottom] = await Promise.all([uiSprite('Item_back01'), uiSprite('Item_Back02')]);
+      if (top) this.el.appendChild(makePlate(top.url, 0, 0, PANEL_W, TOP_H));
+      if (bottom) this.el.appendChild(makePlate(bottom.url, 0, TOP_H, PANEL_W, BOT_H));
+      this.el.classList.add('mv-textured');
+    } catch {
+      // 贴图拉不动就保持纯色底板，功能不受影响
+    }
+  }
+
+  /**
+   * 图标按钮 —— `Ok.ozj`（悬停 `Ok2.ozj`，都是 70×21）。
+   *
+   * 文字（「移 动」）放在 `alt` 上：素材本身带「OK」字样，再叠中文会重影。
+   * 图标异步载入，没到位时退回原来的文字按钮（功能不受影响）。
+   */
+  private button(text: string, onClick: () => void, icon?: [string, string]) {
     const b = document.createElement('button');
     b.type = 'button';
     b.className = 'mv-btn';
     b.textContent = text;
     b.addEventListener('click', onClick);
+    if (icon) void this.attachButtonIcon(b, text, icon);
     return b;
+  }
+
+  /** 把一组图标贴到按钮上（`[常态, 悬停]`） */
+  private async attachButtonIcon(btn: HTMLButtonElement, label: string, [normal, hover]: [string, string]) {
+    try {
+      const [n, h] = await Promise.all([uiSprite(normal), uiSprite(hover)]);
+      if (!n) return;
+      btn.textContent = '';
+      btn.title = label;
+      btn.classList.add('mv-btn-icon');
+      const img = document.createElement('img');
+      img.src = n.url;
+      img.alt = label;
+      img.draggable = false;
+      img.style.imageRendering = 'pixelated';
+      btn.appendChild(img);
+      if (h) {
+        btn.addEventListener('mouseenter', () => (img.src = h.url));
+        btn.addEventListener('mouseleave', () => (img.src = n.url));
+      }
+    } catch {
+      // 载不到图标就保留文字按钮
+    }
+  }
+
+  /**
+   * 右上角关闭按钮 —— `exit_01`（悬停 `exit_02`），位置与背包一致。
+   *
+   * 原来关闭是底部一个「关 闭」按钮，现在挪到右上角图标，
+   * 和背包 / 命令菜单统一（原版是靠再按一次底栏 M）。
+   */
+  private async buildCloseButton() {
+    try {
+      const [ex1, ex2] = await Promise.all([uiSprite('exit_01'), uiSprite('exit_02')]);
+      if (!ex1) return;
+      const close = document.createElement('img');
+      close.src = ex1.url;
+      close.className = 'mv-close';
+      close.draggable = false;
+      close.title = '关闭 (M)';
+      close.style.imageRendering = 'pixelated';
+      if (ex2) {
+        close.addEventListener('mouseenter', () => (close.src = ex2!.url));
+        close.addEventListener('mouseleave', () => (close.src = ex1.url));
+      }
+      close.addEventListener('click', e => {
+        e.stopPropagation();
+        this.hide();
+      });
+      this.el.appendChild(close);
+    } catch {
+      // 拉不到图标就不给关闭按钮，靠 M / Esc 也能关
+    }
   }
 
   /** 表变了：重建成新行（选中位置尽量保留） */
@@ -301,4 +408,23 @@ export class MoveCommandPanel {
       })),
     };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 小工具                                                              */
+/* ------------------------------------------------------------------ */
+
+/** 绝对定位的底板贴图（与 npcPanel 的 `makePlate` 同款，像素对齐原版） */
+function makePlate(url: string, x: number, y: number, w: number, h: number): HTMLImageElement {
+  const img = document.createElement('img');
+  img.src = url;
+  img.draggable = false;
+  img.className = 'mv-sprite';
+  img.style.left = `${x}px`;
+  img.style.top = `${y}px`;
+  img.style.width = `${w}px`;
+  img.style.height = `${h}px`;
+  // 原版是最近邻采样（GL_NEAREST），pixelated 才保得住锐利边缘
+  img.style.imageRendering = 'pixelated';
+  return img;
 }
