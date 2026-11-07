@@ -7,8 +7,11 @@
  * 保原版风味。只提采样质量：
  *
  *   1. 各向异性过滤按 GPU 上限拉满（原来 `texture.ts` 两处写死 4）
- *   2. ACES 色调映射 + 曝光 0.95（原来 NoToneMapping，亮部被截断成纯白）
- *   3. 像素比上限 2 → 3（DPR=3 的屏幕原来只渲染 2/3 分辨率）
+ *   2. 像素比上限 2 → 3（DPR=3 的屏幕原来只渲染 2/3 分辨率）
+ *
+ * **光照 / 色调一律不动**，这是硬约束。试过的两个改动都已回退：
+ *   - ACES 色调映射 → 给画面加「电影调」，改了原版观感
+ *   - 全屏锐化      → 把低模的圆柱锐成多边形柱（法线过渡被硬化）
  *
  * ## 断言
  *
@@ -49,9 +52,14 @@ try {
   console.log(`   色调映射 ${q.toneMapping}  曝光 ${q.toneMappingExposure}`);
   console.log(`   GPU 各向异性上限 ${q.maxAniso} → 贴图用 ${q.aniso}`);
 
-  // three 的枚举：NoToneMapping=0, ACESFilmicToneMapping=4
-  check('色调映射 = ACESFilmic（4）', q.toneMapping === 4, String(q.toneMapping));
-  check('曝光 = 0.95', Math.abs(q.toneMappingExposure - 0.95) < 0.001, String(q.toneMappingExposure));
+  /*
+   * 色调映射保持**原版**的 `NoToneMapping(0)`。
+   *
+   * 曾经试过 ACESFilmic 想让高光有层次，但那给整体画面加了层「电影调」,
+   * 属于改美术方向而非提精度，已回退。这条断言就是防它被重新引入。
+   */
+  check('色调映射 = NoToneMapping（原版直出）', q.toneMapping === 0, String(q.toneMapping));
+  check('曝光 = 1（无调整）', Math.abs(q.toneMappingExposure - 1) < 0.001, String(q.toneMappingExposure));
   check(
     '像素比上限 = 3 且实际值 = min(dpr, 3)',
     q.maxPixelRatio === 3 && q.pixelRatio === Math.min(q.devicePixelRatio, 3),
