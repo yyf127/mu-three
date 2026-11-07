@@ -293,6 +293,7 @@ import { spinState } from './ui/itemSpin';
 import { blendMetrics, detectBlend } from './core/blendHeuristic';
 import { setAdditiveMode, useAdditiveBlend, additiveInfo, fxAlpha } from './core/additive';
 import { loadTexture, resolveTextureCandidates } from './core/texture';
+import { MAX_PIXEL_RATIO, TONE_MAPPING, setMaxAnisotropy, textureAnisotropy } from './core/renderQuality';
 import {
   loadTextPool,
   textAt,
@@ -717,10 +718,24 @@ function stageSize() {
 }
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
 const initialSize = stageSize();
 renderer.setSize(initialSize.w, initialSize.h);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+/*
+ * 画质提升（阶段 1，**不碰光照 / 不改美术方向**）：
+ *
+ *   1. 各向异性过滤按 GPU 上限拉满 —— 原来贴图侧写死 4，斜着看地面很糊
+ *   2. ACES 色调映射 —— 原版直出会把 >1.0 的亮部截成纯白（盔甲高光、
+ *      雪地、技能光效丢细节），ACES 做滚降保住亮部层次
+ *   3. 像素比上限 2 → 3 —— DPR=3 的屏幕原来只渲染 2/3 分辨率，边缘发虚
+ *
+ * 已标 `toneMapped: false` 的材质（加色特效/UI）不受色调映射影响。
+ */
+setMaxAnisotropy(renderer.capabilities.getMaxAnisotropy());
+renderer.toneMapping =
+  TONE_MAPPING.mode === 'ACESFilmic' ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
+renderer.toneMappingExposure = TONE_MAPPING.exposure;
 $('app').appendChild(renderer.domElement);
 
 /*
@@ -12272,6 +12287,42 @@ function boot() {
     commandMenuDropdownItems: () => commandMenu.debugDropdownItems(),
     /** 探针：选下拉里的第 i 项 */
     commandMenuPickDropdown: (i: number) => commandMenu.debugPickDropdown(i),
+    /**
+     * 渲染画质快照（探针用）。
+     *
+     * `maxAniso` 是 GPU 上报的上限值；`aniso` 是贴图实际用的（会被它夹住）。
+     */
+    renderQuality: () => ({
+      pixelRatio: renderer.getPixelRatio(),
+      maxPixelRatio: MAX_PIXEL_RATIO,
+      devicePixelRatio: window.devicePixelRatio,
+      toneMapping: renderer.toneMapping,
+      toneMappingExposure: renderer.toneMappingExposure,
+      maxAniso: renderer.capabilities.getMaxAnisotropy(),
+      aniso: textureAnisotropy(),
+      /*
+       * 抽样场景里真实贴图上的 `anisotropy`，确认值真的落到材质上了
+       * （而不是只在 `renderQuality` 里算出来没人用）。
+       */
+      sampleAniso: (() => {
+        let n = 0;
+        let sum = 0;
+        let min = Infinity;
+        world?.root.traverse((o: THREE.Object3D) => {
+          const mat = (o as THREE.Mesh).material as THREE.Material | undefined;
+          if (!mat) return;
+          for (const m of Array.isArray(mat) ? mat : [mat]) {
+            const t = (m as THREE.MeshBasicMaterial).map;
+            if (t) {
+              sum += t.anisotropy;
+              min = Math.min(min, t.anisotropy);
+              n++;
+            }
+          }
+        });
+        return n ? { count: n, avg: +(sum / n).toFixed(2), min } : null;
+      })(),
+    }),
     /** 探针：选中移动表的第 i 条（等价于 ↑↓ 走到那一行） */
     moveSelect: (i: number) => {
       movePanel.select(i);

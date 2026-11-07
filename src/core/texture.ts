@@ -7,6 +7,7 @@
  */
 import * as THREE from 'three';
 import { assetUrl } from './base';
+import { textureAnisotropy } from './renderQuality';
 
 /** OZJ 头部里塞了一个假的 JPEG 头，真数据从下一个 SOI 开始 */
 const OZJ_HEADER_SCAN = 64;
@@ -312,7 +313,8 @@ function makeTexture(img: DecodedImage, mipmap: boolean) {
   tex.generateMipmaps = mipmap;
   tex.wrapS = THREE.RepeatWrapping;
   tex.wrapT = THREE.RepeatWrapping;
-  tex.anisotropy = 4;
+  // 按设备上限拉满（原来写死 4）—— 斜视角的清晰度主要靠这个
+  tex.anisotropy = textureAnisotropy();
   tex.needsUpdate = true;
   return tex;
 }
@@ -493,7 +495,8 @@ export async function loadTexture(
         tex.generateMipmaps = mipmap;
         tex.wrapS = THREE.RepeatWrapping;
         tex.wrapT = THREE.RepeatWrapping;
-        tex.anisotropy = 4;
+        // 按设备上限拉满（原来写死 4）
+        tex.anisotropy = textureAnisotropy();
         tex.needsUpdate = true;
         return { texture: tex, tag: 'opaque' } as LoadedTexture;
       }
