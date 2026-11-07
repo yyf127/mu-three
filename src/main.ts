@@ -294,6 +294,7 @@ import { blendMetrics, detectBlend } from './core/blendHeuristic';
 import { setAdditiveMode, useAdditiveBlend, additiveInfo, fxAlpha } from './core/additive';
 import { loadTexture, resolveTextureCandidates } from './core/texture';
 import { MAX_PIXEL_RATIO, TONE_MAPPING, setMaxAnisotropy, textureAnisotropy } from './core/renderQuality';
+import { ScreenSharpen } from './core/sharpen';
 import {
   loadTextPool,
   textAt,
@@ -737,6 +738,18 @@ renderer.toneMapping =
   TONE_MAPPING.mode === 'ACESFilmic' ? THREE.ACESFilmicToneMapping : THREE.NoToneMapping;
 renderer.toneMappingExposure = TONE_MAPPING.exposure;
 $('app').appendChild(renderer.domElement);
+
+/*
+ * 全屏锐化后处理（CAS 风格）。
+ *
+ * 数据层「暂时不处理」（后面会上高清贴图版本，可切换），所以在渲染侧再榨一点
+ * 清晰度：把已有细节的局部对比度拉出来。**不动光照、不换材质** ——
+ * 原版预烘焙美术的观感不变，只是不再那么糊。
+ *
+ * `renderer.render()` 的两处调用点都改走它；`sharpen.bypass = true`
+ * 或 `setAmount(0)` 可随时退回原生路径做 A/B 对照。
+ */
+const sharpen = new ScreenSharpen(renderer);
 
 /*
  * 原版光标：`Data/Interface/Cursor*.ozt` 共 9 种（+ Cursoreye 备用）。
@@ -11535,6 +11548,9 @@ window.addEventListener('keyup', e => keys.delete(e.code));
 function onResize() {
   const { w, h } = stageSize();
   renderer.setSize(w, h);
+  // 锐化的 RT 跟着渲染缓冲走，尺寸不符会拉伸模糊
+  const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+  sharpen.setSize(buf.x, buf.y);
   muCamera.camera.aspect = ASPECT;
   muCamera.camera.updateProjectionMatrix();
   // 原版 UI 层跟着舞台缩放，逻辑坐标不变
@@ -12082,7 +12098,8 @@ function frame() {
   // 登录/选角 3D 背景自己判「界面可不可见」，不可见直接 return
   login3d?.tick(dt);
   char3d?.tick(dt);
-  renderer.render(scene, muCamera.camera);
+  // 走锐化后处理（`bypass` / 强度 0 时内部自动退回原生 render）
+  sharpen.render(scene, muCamera.camera);
 }
 
 /* ------------------------------------------------------------------ */
@@ -12287,6 +12304,69 @@ function boot() {
     commandMenuDropdownItems: () => commandMenu.debugDropdownItems(),
     /** 探针：选下拉里的第 i 项 */
     commandMenuPickDropdown: (i: number) => commandMenu.debugPickDropdown(i),
+    /**
+     * 锐化控制（探针 / 控制台实时对照用）。
+     *
+     * `__MU_APP__.sharpen(0)` 关掉看原版；`__MU_APP__.sharpen(0.6)` 打开。
+     * `__MU_APP__.sharpen(1.2)` 会明显过锐（出白边），用来验证「过冲抑制」生效。
+     */
+    sharpen: (amount?: number) => {
+      if (amount !== undefined) sharpen.setAmount(amount);
+      return { amount: sharpen.amount, bypass: sharpen.bypass };
+    },
+    /**
+     * 探针口：在**同一次同步调用**里量三组锐化强度的画质指标。
+     *
+     * 为什么不在探针里自己截图对比：主循环的 `requestAnimationFrame` 会在
+     * 两次截图之间插入新帧，导致「关闭 vs 开启」比的是两个不同场景
+     * （踩过：亮度差 56%，看着像锐化把画面弄暗，其实是换场景了）。
+     *
+     * 这里一次调用完成「渲染 → readPixels → 统计」，RAF 插不进来。
+     *
+     * `pair` 是**配对比较**的关键补充：
+     * 直接用「边缘梯度均值」比会得到反向结果 —— 锐化会**创造出新的弱边缘**，
+     * 分母变大、均值被拉低（实测 -2%）。所以正确做法是**固定同一批像素**：
+     * 以「关闭时就是边缘」的那些点为准，比较它们在锐化前后的梯度。
+     */
+    sharpenMeasure: (amounts: number[] = [0, 0.6, 1.5]) => {
+      const runs = amounts.map(a => sharpen.measure(scene, muCamera.camera, a));
+      const base = runs[0];
+      const { x0, x1, y0, y1 } = sharpen.roi;
+      const w = renderer.getDrawingBufferSize(new THREE.Vector2()).x;
+      // 以第一组（通常是关闭）的梯度图定义「原本就有边缘」的点集
+      const isEdge: boolean[] = [];
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1 - 1; x++) {
+          isEdge.push(Math.abs(base.lum[y * w + x + 1] - base.lum[y * w + x]) > 8);
+        }
+      }
+      const pair = runs.map((r, ri) => {
+        let sum = 0;
+        let n = 0;
+        let i = 0;
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1 - 1; x++) {
+            if (isEdge[i]) {
+              sum += Math.abs(r.lum[y * w + x + 1] - r.lum[y * w + x]);
+              n++;
+            }
+            i++;
+          }
+        }
+        return { amount: amounts[ri], pairEdge: n ? +(sum / n).toFixed(3) : 0, pairN: n };
+      });
+      const clean = runs.map((r, i) => ({
+        amount: amounts[i],
+        grad: r.grad,
+        edgeGrad: r.edgeGrad,
+        edgeN: r.edgeN,
+        whitePct: r.whitePct,
+        rgb: r.rgb,
+        pairEdge: pair[i].pairEdge,
+        pairN: pair[i].pairN,
+      }));
+      return clean;
+    },
     /**
      * 渲染画质快照（探针用）。
      *
@@ -13245,7 +13325,8 @@ function boot() {
      * `box` 用 CSS 像素（左上角 + 宽高），内部按 devicePixelRatio 换算。
      */
     snap: (box?: { x: number; y: number; w: number; h: number }) => {
-      renderer.render(scene, muCamera.camera);
+      // 和屏上保持一致：也走锐化，否则截出来和肉眼看到的不一样
+      sharpen.render(scene, muCamera.camera);
       const src = renderer.domElement;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       const sx = Math.max(0, Math.round((box?.x ?? 0) * dpr));
